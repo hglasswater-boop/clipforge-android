@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import app.clipforge.media.FfmpegMediaEngine
+import app.clipforge.media.TrimRangeSnapper
 import app.clipforge.smb.SmbClient
 import app.clipforge.smb.SmbConnection
 import app.clipforge.smb.SmbEntry
@@ -13,7 +14,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlin.math.abs
 
 data class TrimEditorState(
     val remotePath: String,
@@ -113,18 +113,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun updateTrimRange(requestedStartMs: Long, requestedEndMs: Long): TrimEditorState? {
         val editor = _uiState.value.trimEditor ?: return null
-        val duration = editor.durationMs.coerceAtLeast(1L)
-        val startCandidates = editor.keyframesMs.filter { it in 0 until duration }.ifEmpty { listOf(0L) }
-        val endCandidates = (editor.keyframesMs.filter { it in 1 until duration } + duration).distinct().sorted()
-
-        val start = nearest(startCandidates, requestedStartMs.coerceIn(0L, duration - 1L))
-        var end = nearest(endCandidates, requestedEndMs.coerceIn(1L, duration))
-        if (end <= start) {
-            end = endCandidates.firstOrNull { it > start } ?: duration
-        }
-        if (end <= start) return editor
-
-        val updated = editor.copy(startMs = start, endMs = end)
+        val snapped = TrimRangeSnapper.snap(
+            durationMs = editor.durationMs,
+            keyframesMs = editor.keyframesMs,
+            requestedStartMs = requestedStartMs,
+            requestedEndMs = requestedEndMs
+        )
+        val updated = editor.copy(startMs = snapped.startMs, endMs = snapped.endMs)
         _uiState.update { it.copy(trimEditor = updated, error = null) }
         return updated
     }
@@ -156,9 +151,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update { it.copy(trimEditor = null, status = "編集をキャンセルしました", error = null) }
         viewModelScope.launch(Dispatchers.IO) { pipeline.discardPrepared(editor.localPath) }
     }
-
-    private fun nearest(candidates: List<Long>, target: Long): Long =
-        candidates.minByOrNull { abs(it - target) } ?: target
 
     private fun loadDirectory(path: String) {
         runTask("一覧を取得中") {

@@ -55,4 +55,6 @@ dependencies {
 
     implementation("eu.agno3.jcifs:jcifs-ng:2.1.10")
     implementation("dev.ffmpegkit-maintained:ffmpeg-kit-min:8.1.7")
+
+    testImplementation("junit:junit:4.13.2")
 }
