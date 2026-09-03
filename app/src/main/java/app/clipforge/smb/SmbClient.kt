@@ -84,23 +84,36 @@ class SmbClient : Closeable {
         remote.length()
     }
 
-    fun download(remotePath: String, localFile: File) {
+    fun download(
+        remotePath: String,
+        localFile: File,
+        onProgress: (transferredBytes: Long, totalBytes: Long) -> Unit = { _, _ -> }
+    ) {
         localFile.parentFile?.mkdirs()
         resource(remotePath).use { remote ->
             require(remote.isFile) { "Not a file: $remotePath" }
-            remote.openInputStream().use { input ->
-                localFile.outputStream().buffered(1024 * 1024).use { output -> input.copyTo(output, 1024 * 1024) }
+            val totalBytes = remote.length().coerceAtLeast(0L)
+            remote.openInputStream().buffered(1024 * 1024).use { input ->
+                localFile.outputStream().buffered(1024 * 1024).use { output ->
+                    copyWithProgress(input, output, totalBytes, onProgress)
+                }
             }
         }
     }
 
-    fun uploadAtomically(localFile: File, remotePath: String) {
+    fun uploadAtomically(
+        localFile: File,
+        remotePath: String,
+        onProgress: (transferredBytes: Long, totalBytes: Long) -> Unit = { _, _ -> }
+    ) {
         val finalPath = remotePath.trimStart('/')
         val tempPath = "$finalPath.clipforge-partial-${System.nanoTime()}"
         resource(tempPath).use { temp ->
             try {
-                temp.openOutputStream().use { output ->
-                    localFile.inputStream().buffered(1024 * 1024).use { input -> input.copyTo(output, 1024 * 1024) }
+                temp.openOutputStream().buffered(1024 * 1024).use { output ->
+                    localFile.inputStream().buffered(1024 * 1024).use { input ->
+                        copyWithProgress(input, output, localFile.length().coerceAtLeast(0L), onProgress)
+                    }
                 }
                 resource(finalPath).use { destination ->
                     // Never silently replace an existing remote file. This also closes the
@@ -126,6 +139,31 @@ class SmbClient : Closeable {
         runCatching { context?.close() }
         context = null
         connection = null
+    }
+
+    private fun copyWithProgress(
+        input: java.io.InputStream,
+        output: java.io.OutputStream,
+        totalBytes: Long,
+        onProgress: (Long, Long) -> Unit
+    ) {
+        val buffer = ByteArray(1024 * 1024)
+        val reportInterval = 4L * 1024L * 1024L
+        var transferred = 0L
+        var lastReported = -reportInterval
+        onProgress(0L, totalBytes)
+
+        while (true) {
+            val read = input.read(buffer)
+            if (read < 0) break
+            output.write(buffer, 0, read)
+            transferred += read
+            if (transferred - lastReported >= reportInterval || (totalBytes > 0 && transferred >= totalBytes)) {
+                onProgress(transferred, totalBytes)
+                lastReported = transferred
+            }
+        }
+        if (transferred != lastReported) onProgress(transferred, totalBytes)
     }
 
     private fun resource(path: String) = requireNotNull(context) { "SMB is not connected" }.get(url(path))

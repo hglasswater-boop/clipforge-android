@@ -34,16 +34,19 @@ class RemoteEditPipeline(
         val workDir = createWorkDir()
         try {
             val localInputs = remoteInputs.mapIndexed { index, remote ->
-                onProgress("取得中 ${index + 1}/${remoteInputs.size}: ${remote.substringAfterLast('/')}")
-                File(workDir, "%03d-%s".format(index, remote.substringAfterLast('/'))).also {
-                    smbClient.download(remote, it)
+                val fileName = remote.substringAfterLast('/')
+                File(workDir, "%03d-%s".format(index, fileName)).also { local ->
+                    smbClient.download(remote, local) { done, total ->
+                        onProgress("取得中 ${index + 1}/${remoteInputs.size} ${percent(done, total)}%: $fileName")
+                    }
                 }
             }
             val output = File(workDir, remoteOutput.substringAfterLast('/'))
             onProgress("無劣化で結合中")
             mediaEngine.concatLossless(localInputs, output)
-            onProgress("SMBへ保存中")
-            smbClient.uploadAtomically(output, remoteOutput)
+            smbClient.uploadAtomically(output, remoteOutput) { done, total ->
+                onProgress("SMBへ保存中 ${percent(done, total)}%")
+            }
             onProgress("完了: $remoteOutput")
         } finally {
             workDir.deleteRecursively()
@@ -58,8 +61,9 @@ class RemoteEditPipeline(
         val workDir = createEditWorkDir()
         try {
             val input = File(workDir, remoteInput.substringAfterLast('/'))
-            onProgress("編集用にSMBから取得中: ${remoteInput.substringAfterLast('/')}")
-            smbClient.download(remoteInput, input)
+            smbClient.download(remoteInput, input) { done, total ->
+                onProgress("編集用にSMBから取得中 ${percent(done, total)}%: ${remoteInput.substringAfterLast('/')}")
+            }
             onProgress("動画情報を解析中")
             val signature = mediaEngine.probe(input)
             val durationMs = signature.durationMs
@@ -87,8 +91,9 @@ class RemoteEditPipeline(
         try {
             onProgress("無劣化でカット中")
             mediaEngine.cutLossless(LosslessCutRequest(input, output, startMs, endMs))
-            onProgress("SMBへ保存中")
-            smbClient.uploadAtomically(output, remoteOutput)
+            smbClient.uploadAtomically(output, remoteOutput) { done, total ->
+                onProgress("SMBへ保存中 ${percent(done, total)}%")
+            }
             onProgress("完了: $remoteOutput")
         } finally {
             output.delete()
@@ -142,6 +147,11 @@ class RemoteEditPipeline(
                 "端末の空き容量が不足しています。必要 約${formatGiB(requiredBytes)}GB / 空き 約${formatGiB(availableBytes)}GB"
             )
         }
+    }
+
+    private fun percent(done: Long, total: Long): Int {
+        if (total <= 0L) return 0
+        return ((done.toDouble() / total.toDouble()) * 100.0).toInt().coerceIn(0, 100)
     }
 
     private fun saturatingAdd(left: Long, right: Long): Long {
