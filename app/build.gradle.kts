@@ -3,6 +3,26 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+val clipForgeVersionName = rootProject.file("version.properties")
+    .readLines()
+    .firstOrNull { it.startsWith("versionName=") }
+    ?.substringAfter('=')
+    ?.trim()
+    .orEmpty()
+    .ifBlank { "0.1.0" }
+val clipForgeBuildNumber = providers.gradleProperty("buildNumber").orNull?.toIntOrNull() ?: 1
+
+val stableKeystorePath = System.getenv("CLIPFORGE_KEYSTORE")
+val stableKeystorePassword = System.getenv("CLIPFORGE_KEYSTORE_PASSWORD")
+val stableKeyAlias = System.getenv("CLIPFORGE_KEY_ALIAS")
+val stableKeyPassword = System.getenv("CLIPFORGE_KEY_PASSWORD")
+val stableSigningAvailable = listOf(
+    stableKeystorePath,
+    stableKeystorePassword,
+    stableKeyAlias,
+    stableKeyPassword
+).all { !it.isNullOrBlank() }
+
 android {
     namespace = "app.clipforge"
     compileSdk = 36
@@ -11,12 +31,35 @@ android {
         applicationId = "app.clipforge"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = clipForgeBuildNumber
+        versionName = clipForgeVersionName
+    }
+
+    signingConfigs {
+        if (stableSigningAvailable) {
+            create("stable") {
+                storeFile = file(stableKeystorePath!!)
+                storePassword = stableKeystorePassword
+                keyAlias = stableKeyAlias
+                keyPassword = stableKeyPassword
+            }
+        }
+    }
+
+    buildTypes {
+        if (stableSigningAvailable) {
+            getByName("debug") {
+                signingConfig = signingConfigs.getByName("stable")
+            }
+            getByName("release") {
+                signingConfig = signingConfigs.getByName("stable")
+            }
+        }
     }
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     compileOptions {
