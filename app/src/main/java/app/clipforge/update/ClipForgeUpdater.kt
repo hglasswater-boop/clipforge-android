@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
@@ -83,6 +84,9 @@ private object ClipForgeSelfUpdater {
         val connection = openConnection(RELEASE_API, "application/vnd.github+json")
         try {
             val code = connection.responseCode
+            // The rolling release may not exist until stable signing is configured.
+            // Treat that as "no update" so startup checks are still cached for 24 hours.
+            if (code == HttpURLConnection.HTTP_NOT_FOUND) return@withContext null
             if (code !in 200..299) error("GitHub HTTP $code")
             val body = connection.inputStream.bufferedReader().use { it.readText() }
             val assetsJson = JSONObject(body).getJSONArray("assets")
@@ -193,7 +197,10 @@ fun ClipForgeUpdateHost() {
     Box(Modifier.fillMaxSize()) {
         OutlinedButton(
             onClick = { showSettings = true },
-            modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp)
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .navigationBarsPadding()
+                .padding(16.dp)
         ) {
             Text("更新")
         }
