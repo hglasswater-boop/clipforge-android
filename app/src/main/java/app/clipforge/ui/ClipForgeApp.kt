@@ -1,9 +1,14 @@
 package app.clipforge.ui
 
+import android.app.Activity
+import android.content.ClipData
+import android.content.Context
+import android.content.Intent
 import android.graphics.BitmapFactory
 import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -14,11 +19,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
-import androidx.compose.material3.Checkbox
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -28,8 +31,6 @@ import androidx.compose.material3.RangeSlider
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -43,9 +44,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
@@ -53,87 +54,150 @@ import androidx.media3.ui.PlayerView
 import app.clipforge.MainUiState
 import app.clipforge.MainViewModel
 import app.clipforge.TrimEditorState
-import app.clipforge.smb.SmbEntry
+import app.clipforge.workflow.PickedVideo
 import kotlinx.coroutines.delay
 import java.io.File
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.roundToLong
 
+private const val XFILES_PACKAGE = "app.local1st.files"
+private const val XFILES_PICK_ACTION = "app.local1st.files.action.PICK_FILES"
+private const val XFILES_ALLOWED_EXTENSIONS = "app.local1st.files.extra.ALLOWED_EXTENSIONS"
+
 @Composable
 fun ClipForgeApp(viewModel: MainViewModel) {
-    val dark = androidx.compose.foundation.isSystemInDarkTheme()
-    MaterialTheme(colorScheme = if (dark) darkColorScheme() else lightColorScheme()) {
-        val state by viewModel.uiState.collectAsStateWithLifecycle()
-        val editor = state.trimEditor
-        if (editor != null) {
-            TrimEditorScreen(viewModel, state, editor)
-        } else {
-            BrowserScreen(viewModel, state)
+    val context = LocalContext.current
+    val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val pickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        if (result.resultCode != Activity.RESULT_OK) return@rememberLauncherForActivityResult
+        val uris = result.data.readResultUris()
+        if (uris.isEmpty()) return@rememberLauncherForActivityResult
+        uris.forEach { uri ->
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                )
+            }
         }
+        viewModel.acceptPickedUris(uris.map(Uri::toString))
+    }
+
+    val xFilesAvailable = remember(context) { hasXFilesPicker(context) }
+
+    LaunchedEffect(state.pendingOutput?.localPath) {
+        val output = state.pendingOutput ?: return@LaunchedEffect
+        val file = File(output.localPath)
+        if (!file.isFile) {
+            viewModel.outputHandoffFailed("出力ファイルが見つかりません")
+            return@LaunchedEffect
+        }
+        val uri = FileProvider.getUriForFile(
+            context,
+            "${context.packageName}.fileprovider",
+            file,
+        )
+        val send = Intent(Intent.ACTION_SEND)
+            .setType(output.mimeType)
+            .putExtra(Intent.EXTRA_STREAM, uri)
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        send.clipData = ClipData.newUri(context.contentResolver, output.fileName, uri)
+
+        val handedOff = if (xFilesAvailable) {
+            runCatching {
+                context.startActivity(Intent(send).setPackage(XFILES_PACKAGE))
+            }.isSuccess
+        } else {
+            false
+        }
+        if (handedOff) {
+            viewModel.outputHandedOff()
+        } else {
+            runCatching {
+                context.startActivity(Intent.createChooser(send, "保存先へ送る"))
+            }.onSuccess {
+                viewModel.outputHandedOff()
+            }.onFailure { error ->
+                viewModel.outputHandoffFailed(error.message ?: "出力ファイルを渡せませんでした")
+            }
+        }
+    }
+
+    val editor = state.trimEditor
+    if (editor != null) {
+        TrimEditorScreen(viewModel, state, editor)
+    } else {
+        HomeScreen(
+            viewModel = viewModel,
+            state = state,
+            xFilesAvailable = xFilesAvailable,
+            onPickVideos = { pickerLauncher.launch(buildVideoPickerIntent(context, xFilesAvailable)) },
+        )
     }
 }
 
 @Composable
-private fun BrowserScreen(viewModel: MainViewModel, state: MainUiState) {
-    var host by remember { mutableStateOf("") }
-    var share by remember { mutableStateOf("") }
-    var domain by remember { mutableStateOf("") }
-    var username by remember { mutableStateOf("") }
-    var password by remember { mutableStateOf("") }
-    var outputName by remember { mutableStateOf("") }
+private fun HomeScreen(
+    viewModel: MainViewModel,
+    state: MainUiState,
+    xFilesAvailable: Boolean,
+    onPickVideos: () -> Unit,
+) {
+    var outputName by remember(
+        state.selectedVideos.firstOrNull()?.uri,
+        state.suggestedConcatOutputName,
+    ) { mutableStateOf(state.suggestedConcatOutputName) }
 
     Scaffold { padding ->
         LazyColumn(
-            modifier = Modifier.fillMaxSize().padding(padding).padding(horizontal = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .padding(horizontal = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             item {
                 Spacer(Modifier.height(8.dp))
                 Text("ClipForge", style = MaterialTheme.typography.headlineMedium)
-                Text("MP4 / MKV を再エンコードせずに結合・カット。SMB上の原本は直接書き換えません。")
+                Text("動画探しはファイラーに任せて、ClipForgeは無劣化の結合・カットだけ担当します。")
             }
-
-            if (!state.connected) {
-                item {
-                    ConnectionCard(host, share, domain, username, password,
-                        onHost = { host = it }, onShare = { share = it }, onDomain = { domain = it },
-                        onUsername = { username = it }, onPassword = { password = it },
-                        enabled = !state.busy,
-                        onConnect = { viewModel.connect(host, share, domain, username, password) }
-                    )
-                }
-            } else {
-                item {
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(onClick = viewModel::goUp, enabled = !state.busy && state.currentPath.isNotBlank()) { Text("↑ 上へ") }
-                        Text("/${state.currentPath}")
+            item {
+                Card(Modifier.fillMaxWidth()) {
+                    Column(
+                        Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Text("動画を選択", style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            if (xFilesAvailable) {
+                                "XFilesを開いてMP4 / MKVを選べます。SMBの接続設定と資格情報はXFiles側だけに残ります。"
+                            } else {
+                                "XFilesの選択モードが見つからないため、Androidのファイル選択画面を開きます。"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        Button(onClick = onPickVideos, enabled = !state.busy) {
+                            Text(if (xFilesAvailable) "XFilesで動画を選ぶ" else "動画を選ぶ")
+                        }
                     }
                 }
-                items(state.entries, key = { it.path }) { entry ->
-                    val selectionOrder = state.selectedPaths.indexOf(entry.path).takeIf { it >= 0 }?.plus(1)
-                    RemoteEntryRow(
-                        entry = entry,
-                        selectionOrder = selectionOrder,
-                        enabled = !state.busy,
-                        onOpen = { viewModel.openDirectory(entry) },
-                        onToggle = { viewModel.toggleSelection(entry) }
-                    )
-                }
+            }
+
+            if (state.selectedVideos.isNotEmpty()) {
                 item {
                     EditCard(
-                        selectedPaths = state.selectedPaths,
+                        selectedVideos = state.selectedVideos,
                         outputName = outputName,
                         enabled = !state.busy,
                         onOutputName = { outputName = it },
                         onConcat = { viewModel.concatSelected(outputName) },
                         onOpenTrim = viewModel::openTrimEditor,
                         onMoveSelected = viewModel::moveSelected,
-                        onRemoveSelected = viewModel::removeSelected
+                        onRemoveSelected = viewModel::removeSelected,
                     )
                 }
             }
-
             item { StatusArea(state) }
         }
     }
@@ -148,7 +212,7 @@ private fun TrimEditorScreen(viewModel: MainViewModel, state: MainUiState, edito
             prepare()
         }
     }
-    var outputName by remember(editor.remotePath) { mutableStateOf("") }
+    var outputName by remember(editor.sourceUri) { mutableStateOf("") }
     var previewSelection by remember(editor.localPath) { mutableStateOf(false) }
 
     DisposableEffect(player) {
@@ -168,13 +232,16 @@ private fun TrimEditorScreen(viewModel: MainViewModel, state: MainUiState, edito
 
     Scaffold { padding ->
         LazyColumn(
-            modifier = Modifier.fillMaxSize().padding(padding).padding(horizontal = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .padding(horizontal = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             item {
                 Spacer(Modifier.height(8.dp))
                 Text("カット編集", style = MaterialTheme.typography.headlineMedium)
-                Text(editor.remotePath.substringAfterLast('/'), style = MaterialTheme.typography.titleMedium)
+                Text(editor.sourceName, style = MaterialTheme.typography.titleMedium)
             }
             item {
                 AndroidView(
@@ -185,12 +252,10 @@ private fun TrimEditorScreen(viewModel: MainViewModel, state: MainUiState, edito
                         }
                     },
                     update = { it.player = player },
-                    modifier = Modifier.fillMaxWidth().height(240.dp)
+                    modifier = Modifier.fillMaxWidth().height(240.dp),
                 )
             }
-            item {
-                TrimRangeControls(viewModel, player, editor)
-            }
+            item { TrimRangeControls(viewModel, player, editor) }
             item {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(
@@ -199,7 +264,7 @@ private fun TrimEditorScreen(viewModel: MainViewModel, state: MainUiState, edito
                             player.pause()
                             player.seekTo(editor.startMs)
                         },
-                        enabled = !state.busy
+                        enabled = !state.busy,
                     ) { Text("INへ") }
                     Button(
                         onClick = {
@@ -207,7 +272,7 @@ private fun TrimEditorScreen(viewModel: MainViewModel, state: MainUiState, edito
                             player.play()
                             previewSelection = true
                         },
-                        enabled = !state.busy
+                        enabled = !state.busy,
                     ) { Text("選択範囲を再生") }
                     OutlinedButton(
                         onClick = {
@@ -215,7 +280,7 @@ private fun TrimEditorScreen(viewModel: MainViewModel, state: MainUiState, edito
                             player.pause()
                             player.seekTo(editor.endMs.coerceAtMost(editor.durationMs))
                         },
-                        enabled = !state.busy
+                        enabled = !state.busy,
                     ) { Text("OUTへ") }
                 }
             }
@@ -226,13 +291,17 @@ private fun TrimEditorScreen(viewModel: MainViewModel, state: MainUiState, edito
                     modifier = Modifier.fillMaxWidth(),
                     label = { Text("出力ファイル名 (.mp4 / .mkv)") },
                     placeholder = { Text("空欄なら元ファイル名-cut") },
-                    enabled = !state.busy
+                    enabled = !state.busy,
                 )
             }
             item {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = viewModel::cancelTrimEditor, enabled = !state.busy) { Text("キャンセル") }
-                    Button(onClick = { viewModel.applyTrim(outputName) }, enabled = !state.busy) { Text("この範囲で無劣化カット") }
+                    OutlinedButton(onClick = viewModel::cancelTrimEditor, enabled = !state.busy) {
+                        Text("キャンセル")
+                    }
+                    Button(onClick = { viewModel.applyTrim(outputName) }, enabled = !state.busy) {
+                        Text("この範囲で無劣化カット")
+                    }
                 }
             }
             item {
@@ -242,11 +311,107 @@ private fun TrimEditorScreen(viewModel: MainViewModel, state: MainUiState, edito
                     } else {
                         "キーフレーム一覧を取得できなかったため、範囲指定は時刻ベースです。無劣化カットでは切断位置が前後する場合があります。"
                     },
-                    style = MaterialTheme.typography.bodySmall
+                    style = MaterialTheme.typography.bodySmall,
                 )
             }
             item { StatusArea(state) }
         }
+    }
+}
+
+@Composable
+private fun EditCard(
+    selectedVideos: List<PickedVideo>,
+    outputName: String,
+    enabled: Boolean,
+    onOutputName: (String) -> Unit,
+    onConcat: () -> Unit,
+    onOpenTrim: () -> Unit,
+    onMoveSelected: (String, Int) -> Unit,
+    onRemoveSelected: (String) -> Unit,
+) {
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("編集", style = MaterialTheme.typography.titleMedium)
+            Text("選択: ${selectedVideos.size}本")
+            when {
+                selectedVideos.size == 1 -> {
+                    SelectedVideoRow(
+                        index = 0,
+                        video = selectedVideos.single(),
+                        count = 1,
+                        enabled = enabled,
+                        onMove = onMoveSelected,
+                        onRemove = onRemoveSelected,
+                    )
+                    Button(onClick = onOpenTrim, enabled = enabled) {
+                        Text("プレビューしてカット範囲を選ぶ")
+                    }
+                    Text(
+                        "秒数入力は不要です。動画を見ながら左右のハンドルで範囲を決めます。",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                selectedVideos.size >= 2 -> {
+                    Text("結合キュー", style = MaterialTheme.typography.titleSmall)
+                    selectedVideos.forEachIndexed { index, video ->
+                        SelectedVideoRow(
+                            index = index,
+                            video = video,
+                            count = selectedVideos.size,
+                            enabled = enabled,
+                            onMove = onMoveSelected,
+                            onRemove = onRemoveSelected,
+                        )
+                    }
+                    OutlinedTextField(
+                        value = outputName,
+                        onValueChange = onOutputName,
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("出力ファイル名 (.mp4 / .mkv)") },
+                        supportingText = {
+                            Text("先頭ファイル名 + _concat を初期値にします")
+                        },
+                        enabled = enabled,
+                    )
+                    Button(onClick = onConcat, enabled = enabled) {
+                        Text("この順番で無劣化結合")
+                    }
+                }
+            }
+            Text(
+                "処理後はXFilesへ戻り、保存先フォルダを選びます。原本は直接書き換えません。",
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+    }
+}
+
+@Composable
+private fun SelectedVideoRow(
+    index: Int,
+    video: PickedVideo,
+    count: Int,
+    enabled: Boolean,
+    onMove: (String, Int) -> Unit,
+    onRemove: (String) -> Unit,
+) {
+    Column {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            Text("#${index + 1}", style = MaterialTheme.typography.labelLarge)
+            Column(Modifier.weight(1f).padding(horizontal = 6.dp)) {
+                Text(video.displayName, maxLines = 1)
+                video.sizeBytes?.let { Text(formatBytes(it), style = MaterialTheme.typography.bodySmall) }
+            }
+            TextButton(onClick = { onMove(video.uri, -1) }, enabled = enabled && index > 0) { Text("↑") }
+            TextButton(onClick = { onMove(video.uri, 1) }, enabled = enabled && index < count - 1) { Text("↓") }
+            TextButton(onClick = { onRemove(video.uri) }, enabled = enabled) { Text("×") }
+        }
+        HorizontalDivider()
     }
 }
 
@@ -270,7 +435,7 @@ private fun TrimRangeControls(viewModel: MainViewModel, player: ExoPlayer, edito
                     player.seekTo(if (startMoved) updated.startMs else updated.endMs)
                 }
             },
-            valueRange = 0f..1f
+            valueRange = 0f..1f,
         )
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             Text("IN  ${formatTime(editor.startMs)}")
@@ -278,7 +443,7 @@ private fun TrimRangeControls(viewModel: MainViewModel, player: ExoPlayer, edito
         }
         Text(
             "選択範囲 ${formatTime(editor.endMs - editor.startMs)} / 全体 ${formatTime(editor.durationMs)}",
-            style = MaterialTheme.typography.bodySmall
+            style = MaterialTheme.typography.bodySmall,
         )
     }
 }
@@ -288,7 +453,7 @@ private fun TimelineThumbnailStrip(paths: List<String>) {
     if (paths.isEmpty()) return
     Row(
         modifier = Modifier.fillMaxWidth().height(68.dp).clip(RoundedCornerShape(8.dp)),
-        horizontalArrangement = Arrangement.spacedBy(1.dp)
+        horizontalArrangement = Arrangement.spacedBy(1.dp),
     ) {
         paths.forEach { path ->
             val image = remember(path) { BitmapFactory.decodeFile(path)?.asImageBitmap() }
@@ -297,7 +462,7 @@ private fun TimelineThumbnailStrip(paths: List<String>) {
                     bitmap = image,
                     contentDescription = null,
                     contentScale = ContentScale.Crop,
-                    modifier = Modifier.weight(1f).fillMaxHeight()
+                    modifier = Modifier.weight(1f).fillMaxHeight(),
                 )
             }
         }
@@ -314,136 +479,43 @@ private fun StatusArea(state: MainUiState) {
     }
 }
 
-@Composable
-private fun ConnectionCard(
-    host: String, share: String, domain: String, username: String, password: String,
-    onHost: (String) -> Unit, onShare: (String) -> Unit, onDomain: (String) -> Unit,
-    onUsername: (String) -> Unit, onPassword: (String) -> Unit,
-    enabled: Boolean, onConnect: () -> Unit
-) {
-    Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("SMB接続", style = MaterialTheme.typography.titleMedium)
-            OutlinedTextField(host, onHost, Modifier.fillMaxWidth(), label = { Text("ホスト / IP") }, enabled = enabled)
-            OutlinedTextField(share, onShare, Modifier.fillMaxWidth(), label = { Text("共有名") }, enabled = enabled)
-            OutlinedTextField(domain, onDomain, Modifier.fillMaxWidth(), label = { Text("ドメイン（任意）") }, enabled = enabled)
-            OutlinedTextField(username, onUsername, Modifier.fillMaxWidth(), label = { Text("ユーザー名") }, enabled = enabled)
-            OutlinedTextField(password, onPassword, Modifier.fillMaxWidth(), label = { Text("パスワード") }, enabled = enabled,
-                visualTransformation = PasswordVisualTransformation())
-            Button(onClick = onConnect, enabled = enabled && host.isNotBlank() && share.isNotBlank()) { Text("接続") }
-            Text("SMB1は使わず、SMB2.02〜SMB3.11で接続します。", style = MaterialTheme.typography.bodySmall)
-        }
-    }
+private fun hasXFilesPicker(context: Context): Boolean {
+    val intent = Intent(XFILES_PICK_ACTION).setPackage(XFILES_PACKAGE)
+    return context.packageManager.resolveActivity(intent, 0) != null
 }
 
-@Composable
-private fun RemoteEntryRow(
-    entry: SmbEntry,
-    selectionOrder: Int?,
-    enabled: Boolean,
-    onOpen: () -> Unit,
-    onToggle: () -> Unit
-) {
-    val selected = selectionOrder != null
-    Row(
-        Modifier.fillMaxWidth().clickable(enabled = enabled) { if (entry.directory) onOpen() else if (entry.isVideo) onToggle() }.padding(vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text(if (entry.directory) "📁" else "🎞️", modifier = Modifier.padding(end = 10.dp))
-        Column(Modifier.weight(1f)) {
-            Text(entry.name)
-            if (!entry.directory) Text(formatBytes(entry.size), style = MaterialTheme.typography.bodySmall)
-        }
-        if (entry.isVideo) {
-            selectionOrder?.let { Text("#$it", style = MaterialTheme.typography.labelLarge) }
-            Checkbox(selected, onCheckedChange = { onToggle() }, enabled = enabled)
-        }
+private fun buildVideoPickerIntent(context: Context, xFilesAvailable: Boolean): Intent {
+    if (xFilesAvailable) {
+        return Intent(XFILES_PICK_ACTION)
+            .setPackage(XFILES_PACKAGE)
+            .putExtra(XFILES_ALLOWED_EXTENSIONS, arrayOf("mp4", "mkv"))
     }
-    HorizontalDivider()
+    return Intent(Intent.ACTION_OPEN_DOCUMENT)
+        .addCategory(Intent.CATEGORY_OPENABLE)
+        .setType("video/*")
+        .putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+        .putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("video/mp4", "video/x-matroska", "video/*"))
+        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
 }
 
-@Composable
-private fun EditCard(
-    selectedPaths: List<String>,
-    outputName: String,
-    enabled: Boolean,
-    onOutputName: (String) -> Unit,
-    onConcat: () -> Unit,
-    onOpenTrim: () -> Unit,
-    onMoveSelected: (String, Int) -> Unit,
-    onRemoveSelected: (String) -> Unit
-) {
-    Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("編集", style = MaterialTheme.typography.titleMedium)
-            Text("選択: ${selectedPaths.size}本")
-            when {
-                selectedPaths.size == 1 -> {
-                    Button(onClick = onOpenTrim, enabled = enabled) { Text("プレビューしてカット範囲を選ぶ") }
-                    Text("秒数入力は不要です。動画を見ながら左右のハンドルで範囲を決めます。", style = MaterialTheme.typography.bodySmall)
-                }
-                selectedPaths.size >= 2 -> {
-                    Text("結合キュー", style = MaterialTheme.typography.titleSmall)
-                    selectedPaths.forEachIndexed { index, path ->
-                        ConcatQueueRow(
-                            index = index,
-                            path = path,
-                            count = selectedPaths.size,
-                            enabled = enabled,
-                            onMove = onMoveSelected,
-                            onRemove = onRemoveSelected
-                        )
-                    }
-                    OutlinedTextField(
-                        outputName,
-                        onOutputName,
-                        Modifier.fillMaxWidth(),
-                        label = { Text("出力ファイル名 (.mp4 / .mkv)") },
-                        placeholder = { Text("空欄なら merged.mkv") },
-                        enabled = enabled
-                    )
-                    Button(onClick = onConcat, enabled = enabled) { Text("この順番で無劣化結合") }
-                }
-                else -> Text("動画を1本選ぶとカット、2本以上選ぶと結合できます。", style = MaterialTheme.typography.bodySmall)
-            }
-            Text("既存ファイルは上書きしません。", style = MaterialTheme.typography.bodySmall)
+private fun Intent?.readResultUris(): List<Uri> {
+    val result = LinkedHashSet<Uri>()
+    this?.clipData?.let { clips ->
+        for (index in 0 until clips.itemCount) {
+            clips.getItemAt(index).uri?.let(result::add)
         }
     }
-}
-
-@Composable
-private fun ConcatQueueRow(
-    index: Int,
-    path: String,
-    count: Int,
-    enabled: Boolean,
-    onMove: (String, Int) -> Unit,
-    onRemove: (String) -> Unit
-) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(2.dp)
-    ) {
-        Text("#${index + 1}", style = MaterialTheme.typography.labelLarge)
-        Text(
-            path.substringAfterLast('/'),
-            modifier = Modifier.weight(1f).padding(horizontal = 6.dp),
-            maxLines = 1
-        )
-        TextButton(onClick = { onMove(path, -1) }, enabled = enabled && index > 0) { Text("↑") }
-        TextButton(onClick = { onMove(path, 1) }, enabled = enabled && index < count - 1) { Text("↓") }
-        TextButton(onClick = { onRemove(path) }, enabled = enabled) { Text("×") }
-    }
+    this?.data?.let(result::add)
+    return result.toList()
 }
 
 private fun formatBytes(bytes: Long): String {
     if (bytes < 1024) return "$bytes B"
     val kb = bytes / 1024.0
-    if (kb < 1024) return "%.1f KB".format(kb)
+    if (kb < 1024) return "%.1f KB".format(Locale.US, kb)
     val mb = kb / 1024.0
-    if (mb < 1024) return "%.1f MB".format(mb)
-    return "%.2f GB".format(mb / 1024.0)
+    if (mb < 1024) return "%.1f MB".format(Locale.US, mb)
+    return "%.2f GB".format(Locale.US, mb / 1024.0)
 }
 
 private fun formatTime(ms: Long): String {
