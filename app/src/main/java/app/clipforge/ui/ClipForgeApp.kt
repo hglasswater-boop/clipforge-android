@@ -27,6 +27,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RangeSlider
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
@@ -121,12 +122,14 @@ private fun BrowserScreen(viewModel: MainViewModel, state: MainUiState) {
                 }
                 item {
                     EditCard(
-                        selectedCount = state.selectedPaths.size,
+                        selectedPaths = state.selectedPaths,
                         outputName = outputName,
                         enabled = !state.busy,
                         onOutputName = { outputName = it },
                         onConcat = { viewModel.concatSelected(outputName) },
-                        onOpenTrim = viewModel::openTrimEditor
+                        onOpenTrim = viewModel::openTrimEditor,
+                        onMoveSelected = viewModel::moveSelected,
+                        onRemoveSelected = viewModel::removeSelected
                     )
                 }
             }
@@ -361,24 +364,36 @@ private fun RemoteEntryRow(
 
 @Composable
 private fun EditCard(
-    selectedCount: Int,
+    selectedPaths: List<String>,
     outputName: String,
     enabled: Boolean,
     onOutputName: (String) -> Unit,
     onConcat: () -> Unit,
-    onOpenTrim: () -> Unit
+    onOpenTrim: () -> Unit,
+    onMoveSelected: (String, Int) -> Unit,
+    onRemoveSelected: (String) -> Unit
 ) {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("編集", style = MaterialTheme.typography.titleMedium)
-            Text("選択: ${selectedCount}本")
+            Text("選択: ${selectedPaths.size}本")
             when {
-                selectedCount == 1 -> {
+                selectedPaths.size == 1 -> {
                     Button(onClick = onOpenTrim, enabled = enabled) { Text("プレビューしてカット範囲を選ぶ") }
                     Text("秒数入力は不要です。動画を見ながら左右のハンドルで範囲を決めます。", style = MaterialTheme.typography.bodySmall)
                 }
-                selectedCount >= 2 -> {
-                    Text("結合順は一覧の #1 → #2 → … の順です。選び直すと順番を変更できます。", style = MaterialTheme.typography.bodySmall)
+                selectedPaths.size >= 2 -> {
+                    Text("結合キュー", style = MaterialTheme.typography.titleSmall)
+                    selectedPaths.forEachIndexed { index, path ->
+                        ConcatQueueRow(
+                            index = index,
+                            path = path,
+                            count = selectedPaths.size,
+                            enabled = enabled,
+                            onMove = onMoveSelected,
+                            onRemove = onRemoveSelected
+                        )
+                    }
                     OutlinedTextField(
                         outputName,
                         onOutputName,
@@ -387,12 +402,38 @@ private fun EditCard(
                         placeholder = { Text("空欄なら merged.mkv") },
                         enabled = enabled
                     )
-                    Button(onClick = onConcat, enabled = enabled) { Text("無劣化で結合") }
+                    Button(onClick = onConcat, enabled = enabled) { Text("この順番で無劣化結合") }
                 }
                 else -> Text("動画を1本選ぶとカット、2本以上選ぶと結合できます。", style = MaterialTheme.typography.bodySmall)
             }
             Text("既存ファイルは上書きしません。", style = MaterialTheme.typography.bodySmall)
         }
+    }
+}
+
+@Composable
+private fun ConcatQueueRow(
+    index: Int,
+    path: String,
+    count: Int,
+    enabled: Boolean,
+    onMove: (String, Int) -> Unit,
+    onRemove: (String) -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(2.dp)
+    ) {
+        Text("#${index + 1}", style = MaterialTheme.typography.labelLarge)
+        Text(
+            path.substringAfterLast('/'),
+            modifier = Modifier.weight(1f).padding(horizontal = 6.dp),
+            maxLines = 1
+        )
+        TextButton(onClick = { onMove(path, -1) }, enabled = enabled && index > 0) { Text("↑") }
+        TextButton(onClick = { onMove(path, 1) }, enabled = enabled && index < count - 1) { Text("↓") }
+        TextButton(onClick = { onRemove(path) }, enabled = enabled) { Text("×") }
     }
 }
 
