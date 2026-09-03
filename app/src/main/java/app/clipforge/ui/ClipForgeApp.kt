@@ -9,7 +9,9 @@ import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -18,11 +20,13 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -30,20 +34,25 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RangeSlider
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.FileProvider
@@ -355,15 +364,21 @@ private fun EditCard(
                 selectedVideos.size >= 2 -> {
                     Text("結合キュー", style = MaterialTheme.typography.titleSmall)
                     selectedVideos.forEachIndexed { index, video ->
-                        SelectedVideoRow(
-                            index = index,
-                            video = video,
-                            count = selectedVideos.size,
-                            enabled = enabled,
-                            onMove = onMoveSelected,
-                            onRemove = onRemoveSelected,
-                        )
+                        key(video.uri) {
+                            SelectedVideoRow(
+                                index = index,
+                                video = video,
+                                count = selectedVideos.size,
+                                enabled = enabled,
+                                onMove = onMoveSelected,
+                                onRemove = onRemoveSelected,
+                            )
+                        }
                     }
+                    Text(
+                        "右端の ≡ をつかんで上下にドラッグすると結合順を変更できます。",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
                     OutlinedTextField(
                         value = outputName,
                         onValueChange = onOutputName,
@@ -396,23 +411,86 @@ private fun SelectedVideoRow(
     onMove: (String, Int) -> Unit,
     onRemove: (String) -> Unit,
 ) {
-    Column {
+    var dragOffsetY by remember(video.uri) { mutableStateOf(0f) }
+    var rowHeightPx by remember(video.uri) { mutableStateOf(0f) }
+    val currentIndex by rememberUpdatedState(index)
+    val currentCount by rememberUpdatedState(count)
+    val currentOnMove by rememberUpdatedState(onMove)
+    val visibleName = remember(video.displayName) { compactDisplayName(video.displayName) }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .onSizeChanged { rowHeightPx = it.height.toFloat() }
+            .graphicsLayer { translationY = dragOffsetY },
+    ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(2.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            Text("#${index + 1}", style = MaterialTheme.typography.labelLarge)
-            Column(Modifier.weight(1f).padding(horizontal = 6.dp)) {
-                Text(video.displayName, maxLines = 1)
-                video.sizeBytes?.let { Text(formatBytes(it), style = MaterialTheme.typography.bodySmall) }
+            Text(
+                "#${index + 1}",
+                style = MaterialTheme.typography.labelLarge,
+                modifier = Modifier.padding(end = 2.dp),
+            )
+            Column(Modifier.weight(1f)) {
+                Text(
+                    text = visibleName,
+                    maxLines = 2,
+                    overflow = TextOverflow.Clip,
+                    style = MaterialTheme.typography.bodyLarge,
+                )
+                video.sizeBytes?.let {
+                    Text(formatBytes(it), style = MaterialTheme.typography.bodySmall)
+                }
             }
-            TextButton(onClick = { onMove(video.uri, -1) }, enabled = enabled && index > 0) { Text("↑") }
-            TextButton(onClick = { onMove(video.uri, 1) }, enabled = enabled && index < count - 1) { Text("↓") }
-            TextButton(onClick = { onRemove(video.uri) }, enabled = enabled) { Text("×") }
+            if (count > 1) {
+                Box(
+                    modifier = Modifier
+                        .size(44.dp)
+                        .pointerInput(video.uri, enabled, count) {
+                            if (!enabled) return@pointerInput
+                            detectDragGestures(
+                                onDragStart = { dragOffsetY = 0f },
+                                onDragEnd = { dragOffsetY = 0f },
+                                onDragCancel = { dragOffsetY = 0f },
+                            ) { change, dragAmount ->
+                                change.consume()
+                                dragOffsetY += dragAmount.y
+                                val threshold = (rowHeightPx * 0.45f).coerceAtLeast(36.dp.toPx())
+                                when {
+                                    dragOffsetY <= -threshold && currentIndex > 0 -> {
+                                        currentOnMove(video.uri, -1)
+                                        dragOffsetY += threshold
+                                    }
+                                    dragOffsetY >= threshold && currentIndex < currentCount - 1 -> {
+                                        currentOnMove(video.uri, 1)
+                                        dragOffsetY -= threshold
+                                    }
+                                }
+                            }
+                        },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text("≡", style = MaterialTheme.typography.titleLarge)
+                }
+            }
+            IconButton(
+                onClick = { onRemove(video.uri) },
+                enabled = enabled,
+            ) {
+                Text("×", style = MaterialTheme.typography.titleLarge)
+            }
         }
         HorizontalDivider()
     }
+}
+
+private fun compactDisplayName(name: String): String {
+    val normalized = name.ifBlank { "video" }
+    if (normalized.length <= 24) return normalized
+    return normalized.take(10) + "…" + normalized.takeLast(13)
 }
 
 @Composable
