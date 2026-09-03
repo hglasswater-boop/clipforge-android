@@ -150,11 +150,8 @@ class FfmpegMediaEngine {
         output
     }
 
-    suspend fun concatLosslessPaths(
+    suspend fun requireLosslessConcatCompatibility(
         inputs: List<NamedMediaPath>,
-        outputPath: String,
-        outputName: String,
-        workingDirectory: File,
     ) = withContext(Dispatchers.IO) {
         require(inputs.size >= 2) { "At least two files are required" }
         val signatures = inputs.map { probePath(it.path, it.displayName) }
@@ -167,7 +164,35 @@ class FfmpegMediaEngine {
                 )
             }
         }
+    }
 
+    suspend fun concatLosslessPaths(
+        inputs: List<NamedMediaPath>,
+        outputPath: String,
+        outputName: String,
+        workingDirectory: File,
+    ) = withContext(Dispatchers.IO) {
+        requireLosslessConcatCompatibility(inputs)
+        concatLosslessPathsValidated(
+            inputs = inputs,
+            outputPath = outputPath,
+            outputName = outputName,
+            workingDirectory = workingDirectory,
+        )
+    }
+
+    /**
+     * Runs concat after compatibility has already been verified. This split is required for
+     * FFmpegKit SAF urls because each SAF id is removed when FFprobe/FFmpeg closes it, making the
+     * url intentionally single-use.
+     */
+    suspend fun concatLosslessPathsValidated(
+        inputs: List<NamedMediaPath>,
+        outputPath: String,
+        outputName: String,
+        workingDirectory: File,
+    ) = withContext(Dispatchers.IO) {
+        require(inputs.size >= 2) { "At least two files are required" }
         workingDirectory.mkdirs()
         val listFile = File(workingDirectory, ".clipforge-concat-${System.nanoTime()}.txt")
         try {
@@ -175,6 +200,9 @@ class FfmpegMediaEngine {
             runFfmpeg(
                 listOf(
                     "-hide_banner", "-y",
+                    // The concat demuxer restricts nested protocols by default. Direct XFiles/SMB
+                    // inputs use FFmpegKit's custom saf: protocol, so explicitly allow it.
+                    "-protocol_whitelist", "file,saf,crypto,data",
                     "-f", "concat",
                     "-safe", "0",
                     "-i", listFile.absolutePath,
