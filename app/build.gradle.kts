@@ -98,6 +98,10 @@ dependencies {
 
     implementation("eu.agno3.jcifs:jcifs-ng:2.1.10")
     implementation("dev.ffmpegkit-maintained:ffmpeg-kit-min:8.1.7")
+    // ffmpeg-kit-min 8.1.7 is published without its required smart-exception
+    // dependency in the Maven POM. Without this, FFmpegKitConfig crashes at
+    // runtime with NoClassDefFoundError before FFmpeg can start.
+    implementation("com.arthenica:smart-exception-java:0.2.1")
 
     testImplementation("junit:junit:4.13.2")
 }
