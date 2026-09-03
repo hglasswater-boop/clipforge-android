@@ -3,10 +3,13 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
-val versionProperties = java.util.Properties().apply {
-    rootProject.file("version.properties").inputStream().use { load(it) }
-}
-val clipForgeVersionName = versionProperties.getProperty("versionName") ?: "0.1.0"
+val clipForgeVersionName = rootProject.file("version.properties")
+    .readLines()
+    .firstOrNull { it.startsWith("versionName=") }
+    ?.substringAfter('=')
+    ?.trim()
+    .orEmpty()
+    .ifBlank { "0.1.0" }
 val clipForgeBuildNumber = providers.gradleProperty("buildNumber").orNull?.toIntOrNull() ?: 1
 
 val stableKeystorePath = System.getenv("CLIPFORGE_KEYSTORE")
