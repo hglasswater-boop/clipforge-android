@@ -6,6 +6,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -23,7 +27,7 @@ jobs:
         with:
           gradle-version: '9.6.0'
       - run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
-      - run: gradle --no-daemon :app:assembleDebug
+      - run: gradle --no-daemon :app:testDebugUnitTest :app:assembleDebug
       - uses: actions/upload-artifact@v4
         with:
           name: clipforge-debug-apk
