@@ -73,6 +73,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun moveSelected(path: String, offset: Int) {
+        if (_uiState.value.busy || offset == 0) return
+        _uiState.update { state ->
+            val next = state.selectedPaths.toMutableList()
+            val from = next.indexOf(path)
+            if (from < 0) return@update state
+            val to = (from + offset).coerceIn(0, next.lastIndex)
+            if (to == from) return@update state
+            val item = next.removeAt(from)
+            next.add(to, item)
+            state.copy(selectedPaths = next, error = null)
+        }
+    }
+
+    fun removeSelected(path: String) {
+        if (_uiState.value.busy) return
+        _uiState.update { state ->
+            if (path !in state.selectedPaths) return@update state
+            state.copy(selectedPaths = state.selectedPaths - path, error = null)
+        }
+    }
+
     fun concatSelected(outputName: String) {
         val selected = _uiState.value.selectedPaths
         if (selected.size < 2) {
