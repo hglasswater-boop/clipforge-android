@@ -3,11 +3,12 @@ package app.clipforge.workflow
 import android.content.ContentValues
 import android.content.Context
 import android.net.Uri
+import android.os.ParcelFileDescriptor
 import app.clipforge.media.FfmpegMediaEngine
 import app.clipforge.media.LosslessCutRequest
-import app.clipforge.media.NamedMediaPath
+import app.clipforge.media.NamedMediaDescriptor
+import app.clipforge.media.NamedMediaSignature
 import app.clipforge.media.TimelineThumbnailGenerator
-import com.arthenica.ffmpegkit.FFmpegKitConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -31,10 +32,10 @@ data class PreparedExternalCutSession(
 )
 
 /**
- * External-file pipeline. Legacy fallback operations stage content locally. Direct operations use
- * FFmpegKit's SAF protocol so Android's ContentResolver opens XFiles' seekable SMB descriptors on
- * FFmpeg's behalf. This avoids /proc/self/fd access, which Android/SELinux can reject even when the
- * app itself already owns the descriptor.
+ * External-file pipeline. Legacy fallback operations stage content locally. Direct operations keep
+ * XFiles' seekable SMB ParcelFileDescriptors open and hand their numeric descriptors to FFmpeg's
+ * fd: protocol. FFmpeg dup()s each descriptor internally, so it never has to reopen /proc/self/fd
+ * (blocked by Android SELinux on current devices) and never needs FFmpegKit's saf: JNI callbacks.
  */
 class ExternalEditPipeline(
     private val cacheRoot: File,
@@ -42,8 +43,7 @@ class ExternalEditPipeline(
     private val mediaEngine: FfmpegMediaEngine,
     private val thumbnailGenerator: TimelineThumbnailGenerator = TimelineThumbnailGenerator(),
 ) {
-    private val appContext = context.applicationContext
-    private val contentResolver = appContext.contentResolver
+    private val contentResolver = context.applicationContext.contentResolver
     private val workRoot = File(cacheRoot, "clipforge/external-work")
     private val editSessionRoot = File(cacheRoot, "clipforge/external-edit")
     private val outgoingRoot = File(cacheRoot, "clipforge/outgoing")
@@ -86,8 +86,8 @@ class ExternalEditPipeline(
     }
 
     /**
-     * Direct path: XFiles keeps the source and destination on SMB. FFmpegKit's SAF protocol opens
-     * those content URIs as seekable descriptors without exposing them through /proc/self/fd.
+     * Direct path: XFiles owns the SMB transport, while FFmpeg consumes its seekable descriptors.
+     * No source file is copied to local storage and stream copy (`-c copy`) remains lossless.
      */
     suspend fun concatDirect(
         inputs: List<PickedVideo>,
@@ -99,32 +99,42 @@ class ExternalEditPipeline(
         val destination = Uri.parse(outputUri)
         val workDir = createWorkDir()
         try {
-            // SAF urls are single-use in FFmpegKit: safClose removes their id mapping. Probe with
-            // one set, then create a fresh set for the actual concat command.
-            val probeInputs = inputs.mapIndexed { index, source ->
+            val signatures = inputs.mapIndexed { index, source ->
                 onProgress("SMB入力を確認しています ${index + 1}/${inputs.size}")
-                NamedMediaPath(
-                    path = safReadPath(source),
-                    displayName = source.displayName,
-                )
+                openReadDescriptor(source).use { descriptor ->
+                    NamedMediaSignature(
+                        displayName = source.displayName,
+                        signature = mediaEngine.probeDescriptor(descriptor.fd, source.displayName),
+                    )
+                }
             }
             onProgress("互換性を確認しています")
-            mediaEngine.requireLosslessConcatCompatibility(probeInputs)
+            mediaEngine.requireLosslessConcatCompatibility(signatures)
 
-            val concatInputs = inputs.map { source ->
-                NamedMediaPath(
-                    path = safReadPath(source),
-                    displayName = source.displayName,
+            val inputDescriptors = mutableListOf<ParcelFileDescriptor>()
+            var outputDescriptor: ParcelFileDescriptor? = null
+            try {
+                inputs.forEach { source -> inputDescriptors += openReadDescriptor(source) }
+                outputDescriptor = openReadWriteDescriptor(destination)
+                val descriptorInputs = inputs.indices.map { index ->
+                    NamedMediaDescriptor(
+                        fd = inputDescriptors[index].fd,
+                        displayName = inputs[index].displayName,
+                    )
+                }
+                onProgress("無劣化で結合しながらSMBへ保存中")
+                mediaEngine.concatLosslessDescriptorsValidated(
+                    inputs = descriptorInputs,
+                    outputFd = outputDescriptor.fd,
+                    outputName = outputName,
+                    workingDirectory = workDir,
                 )
+            } finally {
+                runCatching { outputDescriptor?.close() }
+                inputDescriptors.asReversed().forEach { descriptor ->
+                    runCatching { descriptor.close() }
+                }
             }
-            val outputPath = safReadWritePath(destination)
-            onProgress("無劣化で結合しながらSMBへ保存中")
-            mediaEngine.concatLosslessPathsValidated(
-                inputs = concatInputs,
-                outputPath = outputPath,
-                outputName = outputName,
-                workingDirectory = workDir,
-            )
         } catch (error: Throwable) {
             abortRemoteOutput(destination)
             throw error
@@ -191,7 +201,7 @@ class ExternalEditPipeline(
         }
     }
 
-    /** Writes the already-prepared local trim source straight into XFiles' SMB output URI. */
+    /** Writes the already-prepared local trim source straight into XFiles' SMB output descriptor. */
     suspend fun cutPreparedDirect(
         localInputPath: String,
         outputUri: String,
@@ -204,15 +214,16 @@ class ExternalEditPipeline(
         val destination = Uri.parse(outputUri)
         try {
             onProgress("SMB保存先を開いています")
-            val outputPath = safReadWritePath(destination)
-            onProgress("無劣化でカットしながらSMBへ保存中")
-            mediaEngine.cutLosslessToPath(
-                inputPath = input.absolutePath,
-                outputPath = outputPath,
-                outputName = outputName,
-                startMs = startMs,
-                endMs = endMs,
-            )
+            openReadWriteDescriptor(destination).use { outputDescriptor ->
+                onProgress("無劣化でカットしながらSMBへ保存中")
+                mediaEngine.cutLosslessToDescriptor(
+                    inputPath = input.absolutePath,
+                    outputFd = outputDescriptor.fd,
+                    outputName = outputName,
+                    startMs = startMs,
+                    endMs = endMs,
+                )
+            }
         } catch (error: Throwable) {
             abortRemoteOutput(destination)
             throw error
@@ -251,17 +262,24 @@ class ExternalEditPipeline(
         runCatching { contentResolver.delete(uri, null, null) }
     }
 
-    private fun safReadPath(source: PickedVideo): String {
+    private fun openReadDescriptor(source: PickedVideo): ParcelFileDescriptor {
         val uri = Uri.parse(source.uri)
-        return FFmpegKitConfig.getSafParameterForRead(appContext, uri)
-            .takeIf { it.isNotBlank() }
-            ?: throw IOException("FFmpeg用の読み込みパスを作成できません: ${source.displayName}")
+        return try {
+            contentResolver.openFileDescriptor(uri, "r")
+                ?: throw IOException("ファイル記述子を取得できません")
+        } catch (error: Throwable) {
+            val detail = error.message?.takeIf { it.isNotBlank() } ?: error.javaClass.simpleName
+            throw IOException("SMB入力を開けません: ${source.displayName} ($detail)", error)
+        }
     }
 
-    private fun safReadWritePath(uri: Uri): String =
-        FFmpegKitConfig.getSafParameter(appContext, uri, "rw")
-            .takeIf { it.isNotBlank() }
-            ?: throw IOException("FFmpeg用のSMB保存パスを作成できません")
+    private fun openReadWriteDescriptor(uri: Uri): ParcelFileDescriptor = try {
+        contentResolver.openFileDescriptor(uri, "rw")
+            ?: throw IOException("SMB出力のファイル記述子を取得できません")
+    } catch (error: Throwable) {
+        val detail = error.message?.takeIf { it.isNotBlank() } ?: error.javaClass.simpleName
+        throw IOException("SMB保存先を開けません: $detail", error)
+    }
 
     private fun copyToLocal(source: PickedVideo, target: File) {
         target.parentFile?.mkdirs()
