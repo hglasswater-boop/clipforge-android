@@ -265,8 +265,9 @@ class ExternalEditPipeline(
     private fun openReadDescriptor(source: PickedVideo): ParcelFileDescriptor {
         val uri = Uri.parse(source.uri)
         return try {
-            contentResolver.openFileDescriptor(uri, "r")
+            val descriptor = contentResolver.openFileDescriptor(uri, "r")
                 ?: throw IOException("ファイル記述子を取得できません")
+            validateSeekableDescriptor(descriptor, "SMB入力 ${source.displayName}")
         } catch (error: Throwable) {
             val detail = error.message?.takeIf { it.isNotBlank() } ?: error.javaClass.simpleName
             throw IOException("SMB入力を開けません: ${source.displayName} ($detail)", error)
@@ -274,11 +275,25 @@ class ExternalEditPipeline(
     }
 
     private fun openReadWriteDescriptor(uri: Uri): ParcelFileDescriptor = try {
-        contentResolver.openFileDescriptor(uri, "rw")
+        val descriptor = contentResolver.openFileDescriptor(uri, "rw")
             ?: throw IOException("SMB出力のファイル記述子を取得できません")
+        validateSeekableDescriptor(descriptor, "SMB保存先")
     } catch (error: Throwable) {
         val detail = error.message?.takeIf { it.isNotBlank() } ?: error.javaClass.simpleName
         throw IOException("SMB保存先を開けません: $detail", error)
+    }
+
+    private fun validateSeekableDescriptor(
+        descriptor: ParcelFileDescriptor,
+        label: String,
+    ): ParcelFileDescriptor {
+        try {
+            descriptor.seekTo(0L)
+            return descriptor
+        } catch (error: Throwable) {
+            runCatching { descriptor.close() }
+            throw IOException("$label がシーク可能なファイルとして開けません", error)
+        }
     }
 
     private fun copyToLocal(source: PickedVideo, target: File) {
