@@ -79,7 +79,7 @@ data class MainUiState(
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val pipeline = ExternalEditPipeline(
         cacheRoot = application.cacheDir,
-        contentResolver = application.contentResolver,
+        context = application,
         mediaEngine = FfmpegMediaEngine(),
     )
     private val _uiState = MutableStateFlow(MainUiState())
