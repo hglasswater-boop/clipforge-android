@@ -270,29 +270,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
-    /** Legacy fallback for environments without XFiles' direct output bridge. */
     fun concatSelected(outputName: String) {
-        val selected = _uiState.value.selectedVideos
-        if (selected.size < 2) {
-            showError("結合するMP4/MKVを2本以上選択してください")
-            return
-        }
-        val name = validatedOutputName(outputName, suggestedConcatName(selected.first().displayName)) ?: return
-        runTask("結合を開始") {
-            val output = pipeline.concat(selected, name) { message ->
-                _uiState.update { it.copy(status = message) }
-            }
-            _uiState.update {
-                it.copy(
-                    pendingOutput = PendingOutput(
-                        localPath = output.absolutePath,
-                        fileName = output.name,
-                        mimeType = mimeFor(output.name),
-                    ),
-                    status = "XFilesで保存先を選択します",
-                )
-            }
-        }
+        requestConcatDestination(outputName)
     }
 
     fun openTrimEditor() {
@@ -337,30 +316,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return updated
     }
 
-    /** Legacy fallback for environments without XFiles' direct output bridge. */
     fun applyTrim(outputName: String) {
-        val editor = _uiState.value.trimEditor ?: return
-        val name = validatedOutputName(outputName, suggestedCutName(editor.sourceName)) ?: return
-        runTask("カットを開始") {
-            val output = pipeline.cutPrepared(
-                localInputPath = editor.localPath,
-                outputName = name,
-                startMs = editor.startMs,
-                endMs = editor.endMs,
-            ) { message -> _uiState.update { it.copy(status = message) } }
-            pipeline.discardPrepared(editor.localPath)
-            _uiState.update {
-                it.copy(
-                    trimEditor = null,
-                    pendingOutput = PendingOutput(
-                        localPath = output.absolutePath,
-                        fileName = output.name,
-                        mimeType = mimeFor(output.name),
-                    ),
-                    status = "XFilesで保存先を選択します",
-                )
-            }
-        }
+        requestCutDestination(outputName)
     }
 
     fun cancelTrimEditor() {
