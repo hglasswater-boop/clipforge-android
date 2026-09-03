@@ -1,9 +1,12 @@
 package app.clipforge.workflow
 
 import android.content.ContentResolver
+import android.content.ContentValues
 import android.net.Uri
+import android.os.ParcelFileDescriptor
 import app.clipforge.media.FfmpegMediaEngine
 import app.clipforge.media.LosslessCutRequest
+import app.clipforge.media.NamedMediaPath
 import app.clipforge.media.TimelineThumbnailGenerator
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -28,9 +31,9 @@ data class PreparedExternalCutSession(
 )
 
 /**
- * Stages content:// inputs locally, performs stream-copy editing, and leaves the result in the
- * app cache so FileProvider can hand it back to XFiles. XFiles remains responsible for SMB access
- * and the final destination, so ClipForge never needs SMB credentials.
+ * External-file pipeline. Legacy fallback operations stage content locally. Direct operations keep
+ * SMB credentials in XFiles and pass seekable file descriptors to FFmpeg, so concat can read from
+ * SMB and mux straight back to an SMB partial file without storing whole videos on the device.
  */
 class ExternalEditPipeline(
     private val cacheRoot: File,
@@ -44,8 +47,10 @@ class ExternalEditPipeline(
 
     init {
         cleanupOldOutgoing()
+        cleanupOldPrepared()
     }
 
+    /** Legacy fallback when the installed file manager cannot provide a direct writable output. */
     suspend fun concat(
         inputs: List<PickedVideo>,
         outputName: String,
@@ -77,6 +82,61 @@ class ExternalEditPipeline(
         }
     }
 
+    /**
+     * Direct path: each input stays behind XFiles' seekable read provider and FFmpeg writes into a
+     * seekable SMB partial output. XFiles renames that partial only after commit succeeds.
+     */
+    suspend fun concatDirect(
+        inputs: List<PickedVideo>,
+        outputUri: String,
+        outputName: String,
+        onProgress: (String) -> Unit = {},
+    ) = withContext(Dispatchers.IO) {
+        require(inputs.size >= 2) { "結合する動画を2本以上選択してください" }
+        val destination = Uri.parse(outputUri)
+        val inputDescriptors = mutableListOf<ParcelFileDescriptor>()
+        var outputDescriptor: ParcelFileDescriptor? = null
+        val workDir = createWorkDir()
+        try {
+            val namedInputs = inputs.mapIndexed { index, source ->
+                onProgress("SMB入力を開いています ${index + 1}/${inputs.size}")
+                val descriptor = contentResolver.openFileDescriptor(Uri.parse(source.uri), "r")
+                    ?: throw IOException("読み込みに失敗: ${source.displayName}")
+                inputDescriptors += descriptor
+                NamedMediaPath(
+                    path = descriptorPath(descriptor),
+                    displayName = source.displayName,
+                )
+            }
+            onProgress("SMB保存先を開いています")
+            outputDescriptor = contentResolver.openFileDescriptor(destination, "rw")
+                ?: throw IOException("SMB保存先を開けません")
+            onProgress("互換性を確認して無劣化結合中")
+            mediaEngine.concatLosslessPaths(
+                inputs = namedInputs,
+                outputPath = descriptorPath(outputDescriptor),
+                outputName = outputName,
+                workingDirectory = workDir,
+            )
+        } catch (error: Throwable) {
+            abortRemoteOutput(destination)
+            throw error
+        } finally {
+            inputDescriptors.forEach { runCatching { it.close() } }
+            runCatching { outputDescriptor?.close() }
+            workDir.deleteRecursively()
+        }
+
+        try {
+            onProgress("SMB保存を確定しています")
+            commitRemoteOutput(destination)
+            onProgress("SMBへ直接保存しました")
+        } catch (error: Throwable) {
+            abortRemoteOutput(destination)
+            throw error
+        }
+    }
+
     suspend fun prepareCut(
         source: PickedVideo,
         onProgress: (String) -> Unit = {},
@@ -104,6 +164,7 @@ class ExternalEditPipeline(
         }
     }
 
+    /** Legacy local-output fallback. */
     suspend fun cutPrepared(
         localInputPath: String,
         outputName: String,
@@ -125,6 +186,48 @@ class ExternalEditPipeline(
         }
     }
 
+    /** Writes the already-prepared local trim source straight into XFiles' SMB output descriptor. */
+    suspend fun cutPreparedDirect(
+        localInputPath: String,
+        outputUri: String,
+        outputName: String,
+        startMs: Long,
+        endMs: Long,
+        onProgress: (String) -> Unit = {},
+    ) = withContext(Dispatchers.IO) {
+        val input = validatedPreparedFile(localInputPath)
+        val destination = Uri.parse(outputUri)
+        var outputDescriptor: ParcelFileDescriptor? = null
+        try {
+            onProgress("SMB保存先を開いています")
+            outputDescriptor = contentResolver.openFileDescriptor(destination, "rw")
+                ?: throw IOException("SMB保存先を開けません")
+            onProgress("無劣化でカットしながらSMBへ保存中")
+            mediaEngine.cutLosslessToPath(
+                inputPath = input.absolutePath,
+                outputPath = descriptorPath(outputDescriptor),
+                outputName = outputName,
+                startMs = startMs,
+                endMs = endMs,
+            )
+        } catch (error: Throwable) {
+            abortRemoteOutput(destination)
+            throw error
+        } finally {
+            runCatching { outputDescriptor?.close() }
+        }
+
+        try {
+            onProgress("SMB保存を確定しています")
+            commitRemoteOutput(destination)
+            discardPrepared(localInputPath)
+            onProgress("SMBへ直接保存しました")
+        } catch (error: Throwable) {
+            abortRemoteOutput(destination)
+            throw error
+        }
+    }
+
     fun discardPrepared(localInputPath: String) {
         runCatching {
             val input = validatedPreparedFile(localInputPath)
@@ -136,6 +239,19 @@ class ExternalEditPipeline(
         runCatching { editSessionRoot.deleteRecursively() }
         runCatching { workRoot.deleteRecursively() }
     }
+
+    private fun commitRemoteOutput(uri: Uri) {
+        val values = ContentValues().apply { put(REMOTE_COMMIT_KEY, true) }
+        val updated = contentResolver.update(uri, values, null, null)
+        if (updated != 1) throw IOException("SMB出力を確定できませんでした")
+    }
+
+    private fun abortRemoteOutput(uri: Uri) {
+        runCatching { contentResolver.delete(uri, null, null) }
+    }
+
+    private fun descriptorPath(descriptor: ParcelFileDescriptor): String =
+        "/proc/self/fd/${descriptor.fd}"
 
     private fun copyToLocal(source: PickedVideo, target: File) {
         target.parentFile?.mkdirs()
@@ -199,10 +315,19 @@ class ExternalEditPipeline(
         File(File(outgoingRoot, UUID.randomUUID().toString()).apply { mkdirs() }, outputName)
 
     private fun cleanupOldOutgoing() {
+        cleanupOldChildren(outgoingRoot)
+    }
+
+    private fun cleanupOldPrepared() {
+        cleanupOldChildren(editSessionRoot)
+        cleanupOldChildren(workRoot)
+    }
+
+    private fun cleanupOldChildren(root: File) {
         runCatching {
-            if (!outgoingRoot.isDirectory) return@runCatching
-            val cutoff = System.currentTimeMillis() - OUTGOING_RETENTION_MS
-            outgoingRoot.listFiles().orEmpty().forEach { session ->
+            if (!root.isDirectory) return@runCatching
+            val cutoff = System.currentTimeMillis() - RETENTION_MS
+            root.listFiles().orEmpty().forEach { session ->
                 if (session.lastModified() < cutoff) session.deleteRecursively()
             }
         }
@@ -217,6 +342,7 @@ class ExternalEditPipeline(
         String.format(Locale.US, "%.1f", bytes / (1024.0 * 1024.0 * 1024.0))
 
     private companion object {
-        const val OUTGOING_RETENTION_MS = 24L * 60L * 60L * 1000L
+        const val REMOTE_COMMIT_KEY = "commit"
+        const val RETENTION_MS = 24L * 60L * 60L * 1000L
     }
 }

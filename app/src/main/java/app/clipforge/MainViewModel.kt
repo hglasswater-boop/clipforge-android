@@ -7,6 +7,9 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import app.clipforge.media.FfmpegMediaEngine
 import app.clipforge.media.TrimRangeSnapper
+import app.clipforge.processing.ClipForgeProcessingService
+import app.clipforge.processing.ProcessingState
+import app.clipforge.processing.ProcessingStateStore
 import app.clipforge.workflow.ExternalEditPipeline
 import app.clipforge.workflow.PickedVideo
 import kotlinx.coroutines.Dispatchers
@@ -51,11 +54,21 @@ data class PendingOutput(
     val mimeType: String,
 )
 
+enum class PendingDestinationKind { CONCAT, CUT }
+
+data class PendingDestinationRequest(
+    val token: Long,
+    val kind: PendingDestinationKind,
+    val outputName: String,
+    val mimeType: String,
+)
+
 data class MainUiState(
     val busy: Boolean = false,
     val selectedVideos: List<PickedVideo> = emptyList(),
     val trimEditor: TrimEditorState? = null,
     val pendingOutput: PendingOutput? = null,
+    val pendingDestination: PendingDestinationRequest? = null,
     val status: String = "動画を選択してください",
     val error: String? = null,
 ) {
@@ -71,6 +84,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     )
     private val _uiState = MutableStateFlow(MainUiState())
     val uiState = _uiState.asStateFlow()
+
+    init {
+        viewModelScope.launch {
+            ProcessingStateStore.state.collect { processing ->
+                when (processing) {
+                    ProcessingState.Idle -> Unit
+                    is ProcessingState.Running -> _uiState.update {
+                        it.copy(busy = true, status = processing.message, error = null)
+                    }
+                    is ProcessingState.Success -> _uiState.update {
+                        it.copy(busy = false, status = processing.message, error = null)
+                    }
+                    is ProcessingState.Failure -> _uiState.update {
+                        it.copy(busy = false, status = "失敗", error = processing.message)
+                    }
+                }
+            }
+        }
+    }
 
     fun acceptPickedUris(uriStrings: List<String>) {
         if (_uiState.value.busy) return
@@ -90,6 +122,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         selectedVideos = videos,
                         trimEditor = null,
                         pendingOutput = null,
+                        pendingDestination = null,
                         status = "${videos.size}本の動画を選択しました",
                         error = if (videos.size != unique.size) "MP4 / MKV 以外のファイルは除外しました" else null,
                     )
@@ -124,34 +157,121 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val next = state.selectedVideos.filterNot { it.uri == uri }
             state.copy(
                 selectedVideos = next,
+                pendingDestination = null,
                 status = if (next.isEmpty()) "動画を選択してください" else "${next.size}本の動画を選択しました",
                 error = null,
             )
         }
     }
 
-    fun concatSelected(outputName: String) {
+    fun requestConcatDestination(outputName: String) {
         val selected = _uiState.value.selectedVideos
         if (selected.size < 2) {
             showError("結合するMP4/MKVを2本以上選択してください")
             return
         }
         val name = validatedOutputName(outputName, suggestedConcatName(selected.first().displayName)) ?: return
-        runTask("結合を開始") {
-            val output = pipeline.concat(selected, name) { message ->
-                _uiState.update { it.copy(status = message) }
-            }
-            _uiState.update {
-                it.copy(
-                    pendingOutput = PendingOutput(
-                        localPath = output.absolutePath,
-                        fileName = output.name,
-                        mimeType = mimeFor(output.name),
-                    ),
-                    status = "XFilesで保存先を選択します",
-                )
+        requestDestination(PendingDestinationKind.CONCAT, name)
+    }
+
+    fun requestCutDestination(outputName: String) {
+        val editor = _uiState.value.trimEditor ?: return
+        val name = validatedOutputName(outputName, suggestedCutName(editor.sourceName)) ?: return
+        requestDestination(PendingDestinationKind.CUT, name)
+    }
+
+    private fun requestDestination(kind: PendingDestinationKind, outputName: String) {
+        if (_uiState.value.busy) return
+        _uiState.update {
+            it.copy(
+                pendingDestination = PendingDestinationRequest(
+                    token = System.nanoTime(),
+                    kind = kind,
+                    outputName = outputName,
+                    mimeType = mimeFor(outputName),
+                ),
+                status = "XFilesでSMB保存先を選択してください",
+                error = null,
+            )
+        }
+    }
+
+    fun destinationPickerCancelled() {
+        if (_uiState.value.pendingDestination == null) return
+        _uiState.update {
+            it.copy(
+                pendingDestination = null,
+                status = "保存先の選択をキャンセルしました",
+                error = null,
+            )
+        }
+    }
+
+    fun destinationPickerFailed(message: String) {
+        _uiState.update {
+            it.copy(
+                pendingDestination = null,
+                status = "保存先を開けませんでした",
+                error = message,
+            )
+        }
+    }
+
+    fun startPendingDestination(outputUri: String) {
+        val state = _uiState.value
+        val pending = state.pendingDestination ?: return
+        val app = getApplication<Application>()
+        val started = runCatching {
+            when (pending.kind) {
+                PendingDestinationKind.CONCAT -> {
+                    require(state.selectedVideos.size >= 2) { "結合キューがありません" }
+                    ClipForgeProcessingService.startConcat(
+                        context = app,
+                        inputs = state.selectedVideos,
+                        outputUri = outputUri,
+                        outputName = pending.outputName,
+                    )
+                }
+                PendingDestinationKind.CUT -> {
+                    val editor = requireNotNull(state.trimEditor) { "カット編集情報がありません" }
+                    ClipForgeProcessingService.startCut(
+                        context = app,
+                        localInputPath = editor.localPath,
+                        outputUri = outputUri,
+                        outputName = pending.outputName,
+                        startMs = editor.startMs,
+                        endMs = editor.endMs,
+                    )
+                }
             }
         }
+        started.fold(
+            onSuccess = {
+                _uiState.update {
+                    it.copy(
+                        busy = true,
+                        trimEditor = if (pending.kind == PendingDestinationKind.CUT) null else it.trimEditor,
+                        pendingDestination = null,
+                        status = "バックグラウンド処理を開始しました",
+                        error = null,
+                    )
+                }
+            },
+            onFailure = { error ->
+                runCatching { app.contentResolver.delete(Uri.parse(outputUri), null, null) }
+                _uiState.update {
+                    it.copy(
+                        pendingDestination = null,
+                        status = "処理を開始できませんでした",
+                        error = error.message ?: error.javaClass.simpleName,
+                    )
+                }
+            },
+        )
+    }
+
+    fun concatSelected(outputName: String) {
+        requestConcatDestination(outputName)
     }
 
     fun openTrimEditor() {
@@ -197,28 +317,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun applyTrim(outputName: String) {
-        val editor = _uiState.value.trimEditor ?: return
-        val name = validatedOutputName(outputName, suggestedCutName(editor.sourceName)) ?: return
-        runTask("カットを開始") {
-            val output = pipeline.cutPrepared(
-                localInputPath = editor.localPath,
-                outputName = name,
-                startMs = editor.startMs,
-                endMs = editor.endMs,
-            ) { message -> _uiState.update { it.copy(status = message) } }
-            pipeline.discardPrepared(editor.localPath)
-            _uiState.update {
-                it.copy(
-                    trimEditor = null,
-                    pendingOutput = PendingOutput(
-                        localPath = output.absolutePath,
-                        fileName = output.name,
-                        mimeType = mimeFor(output.name),
-                    ),
-                    status = "XFilesで保存先を選択します",
-                )
-            }
-        }
+        requestCutDestination(outputName)
     }
 
     fun cancelTrimEditor() {
@@ -305,10 +404,5 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _uiState.update { it.copy(busy = false) }
             }
         }
-    }
-
-    override fun onCleared() {
-        pipeline.cleanupPreparedSessions()
-        super.onCleared()
     }
 }
