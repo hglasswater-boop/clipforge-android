@@ -4,6 +4,8 @@ import android.content.ContentValues
 import android.content.Context
 import android.net.Uri
 import android.os.ParcelFileDescriptor
+import android.system.Os
+import android.system.OsConstants
 import app.clipforge.media.FfmpegMediaEngine
 import app.clipforge.media.LosslessCutRequest
 import app.clipforge.media.NamedMediaDescriptor
@@ -288,7 +290,7 @@ class ExternalEditPipeline(
         label: String,
     ): ParcelFileDescriptor {
         try {
-            descriptor.seekTo(0L)
+            Os.lseek(descriptor.fileDescriptor, 0L, OsConstants.SEEK_SET)
             return descriptor
         } catch (error: Throwable) {
             runCatching { descriptor.close() }
