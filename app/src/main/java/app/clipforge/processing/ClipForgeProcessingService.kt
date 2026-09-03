@@ -47,7 +47,7 @@ class ClipForgeProcessingService : Service() {
         processingJob = serviceScope.launch {
             val pipeline = ExternalEditPipeline(
                 cacheRoot = cacheDir,
-                contentResolver = contentResolver,
+                context = applicationContext,
                 mediaEngine = FfmpegMediaEngine(),
             )
             try {
