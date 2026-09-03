@@ -35,9 +35,10 @@ data class PreparedExternalCutSession(
 
 /**
  * External-file pipeline. Legacy fallback operations stage content locally. Direct operations keep
- * XFiles' seekable SMB ParcelFileDescriptors open and hand their numeric descriptors to FFmpeg's
- * fd: protocol. FFmpeg dup()s each descriptor internally, so it never has to reopen /proc/self/fd
- * (blocked by Android SELinux on current devices) and never needs FFmpegKit's saf: JNI callbacks.
+ * seekable ParcelFileDescriptors open and hand their numeric descriptors to FFmpeg's fd: protocol.
+ * FFmpeg dup()s each descriptor internally, so it never has to reopen /proc/self/fd (blocked by
+ * Android SELinux on current devices). XFiles SMB outputs use an explicit commit step, while normal
+ * Android document-provider outputs are already final once their descriptor is closed.
  */
 class ExternalEditPipeline(
     private val cacheRoot: File,
@@ -88,8 +89,9 @@ class ExternalEditPipeline(
     }
 
     /**
-     * Direct path: XFiles owns the SMB transport, while FFmpeg consumes its seekable descriptors.
-     * No source file is copied to local storage and stream copy (`-c copy`) remains lossless.
+     * Direct path: the selected provider owns the transport/storage while FFmpeg consumes seekable
+     * descriptors. No source file is copied to local storage and stream copy (`-c copy`) remains
+     * lossless.
      */
     suspend fun concatDirect(
         inputs: List<PickedVideo>,
@@ -99,6 +101,8 @@ class ExternalEditPipeline(
     ) = withContext(Dispatchers.IO) {
         require(inputs.size >= 2) { "結合する動画を2本以上選択してください" }
         val destination = Uri.parse(outputUri)
+        val remoteDestination = isXFilesRemoteOutput(destination)
+        val destinationLabel = if (remoteDestination) "SMB" else "端末"
         val workDir = createWorkDir()
         try {
             val signatures = inputs.mapIndexed { index, source ->
@@ -124,7 +128,7 @@ class ExternalEditPipeline(
                         displayName = inputs[index].displayName,
                     )
                 }
-                onProgress("無劣化で結合しながらSMBへ保存中")
+                onProgress("無劣化で結合しながら${destinationLabel}へ保存中")
                 mediaEngine.concatLosslessDescriptorsValidated(
                     inputs = descriptorInputs,
                     outputFd = outputDescriptor.fd,
@@ -138,18 +142,22 @@ class ExternalEditPipeline(
                 }
             }
         } catch (error: Throwable) {
-            abortRemoteOutput(destination)
+            abortOutput(destination)
             throw error
         } finally {
             workDir.deleteRecursively()
         }
 
         try {
-            onProgress("SMB保存を確定しています")
-            commitRemoteOutput(destination)
-            onProgress("SMBへ直接保存しました")
+            if (remoteDestination) {
+                onProgress("SMB保存を確定しています")
+                commitRemoteOutput(destination)
+                onProgress("SMBへ直接保存しました")
+            } else {
+                onProgress("端末へ保存しました")
+            }
         } catch (error: Throwable) {
-            abortRemoteOutput(destination)
+            abortOutput(destination)
             throw error
         }
     }
@@ -203,7 +211,7 @@ class ExternalEditPipeline(
         }
     }
 
-    /** Writes the already-prepared local trim source straight into XFiles' SMB output descriptor. */
+    /** Writes the already-prepared local trim source straight into the selected output descriptor. */
     suspend fun cutPreparedDirect(
         localInputPath: String,
         outputUri: String,
@@ -214,10 +222,12 @@ class ExternalEditPipeline(
     ) = withContext(Dispatchers.IO) {
         val input = validatedPreparedFile(localInputPath)
         val destination = Uri.parse(outputUri)
+        val remoteDestination = isXFilesRemoteOutput(destination)
+        val destinationLabel = if (remoteDestination) "SMB" else "端末"
         try {
-            onProgress("SMB保存先を開いています")
+            onProgress("${destinationLabel}保存先を開いています")
             openReadWriteDescriptor(destination).use { outputDescriptor ->
-                onProgress("無劣化でカットしながらSMBへ保存中")
+                onProgress("無劣化でカットしながら${destinationLabel}へ保存中")
                 mediaEngine.cutLosslessToDescriptor(
                     inputPath = input.absolutePath,
                     outputFd = outputDescriptor.fd,
@@ -227,17 +237,21 @@ class ExternalEditPipeline(
                 )
             }
         } catch (error: Throwable) {
-            abortRemoteOutput(destination)
+            abortOutput(destination)
             throw error
         }
 
         try {
-            onProgress("SMB保存を確定しています")
-            commitRemoteOutput(destination)
+            if (remoteDestination) {
+                onProgress("SMB保存を確定しています")
+                commitRemoteOutput(destination)
+                onProgress("SMBへ直接保存しました")
+            } else {
+                onProgress("端末へ保存しました")
+            }
             discardPrepared(localInputPath)
-            onProgress("SMBへ直接保存しました")
         } catch (error: Throwable) {
-            abortRemoteOutput(destination)
+            abortOutput(destination)
             throw error
         }
     }
@@ -255,14 +269,18 @@ class ExternalEditPipeline(
     }
 
     private fun commitRemoteOutput(uri: Uri) {
+        check(isXFilesRemoteOutput(uri)) { "XFiles以外の保存先にSMB確定処理は実行できません" }
         val values = ContentValues().apply { put(REMOTE_COMMIT_KEY, true) }
         val updated = contentResolver.update(uri, values, null, null)
         if (updated != 1) throw IOException("SMB出力を確定できませんでした")
     }
 
-    private fun abortRemoteOutput(uri: Uri) {
+    private fun abortOutput(uri: Uri) {
         runCatching { contentResolver.delete(uri, null, null) }
     }
+
+    private fun isXFilesRemoteOutput(uri: Uri): Boolean =
+        uri.authority == XFILES_REMOTE_PROVIDER_AUTHORITY && uri.getQueryParameter("mode") == "output"
 
     private fun openReadDescriptor(source: PickedVideo): ParcelFileDescriptor {
         val uri = Uri.parse(source.uri)
@@ -278,11 +296,11 @@ class ExternalEditPipeline(
 
     private fun openReadWriteDescriptor(uri: Uri): ParcelFileDescriptor = try {
         val descriptor = contentResolver.openFileDescriptor(uri, "rw")
-            ?: throw IOException("SMB出力のファイル記述子を取得できません")
-        validateSeekableDescriptor(descriptor, "SMB保存先")
+            ?: throw IOException("保存先のファイル記述子を取得できません")
+        validateSeekableDescriptor(descriptor, "保存先")
     } catch (error: Throwable) {
         val detail = error.message?.takeIf { it.isNotBlank() } ?: error.javaClass.simpleName
-        throw IOException("SMB保存先を開けません: $detail", error)
+        throw IOException("保存先を開けません: $detail", error)
     }
 
     private fun validateSeekableDescriptor(
@@ -387,6 +405,7 @@ class ExternalEditPipeline(
         String.format(Locale.US, "%.1f", bytes / (1024.0 * 1024.0 * 1024.0))
 
     private companion object {
+        const val XFILES_REMOTE_PROVIDER_AUTHORITY = "app.local1st.files.remotefileprovider"
         const val REMOTE_COMMIT_KEY = "commit"
         const val RETENTION_MS = 24L * 60L * 60L * 1000L
     }
