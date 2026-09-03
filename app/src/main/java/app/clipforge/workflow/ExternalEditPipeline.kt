@@ -8,6 +8,7 @@ import app.clipforge.media.TimelineThumbnailGenerator
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.IOException
 import java.util.Locale
 import java.util.UUID
 
@@ -139,10 +140,16 @@ class ExternalEditPipeline(
     private fun copyToLocal(source: PickedVideo, target: File) {
         target.parentFile?.mkdirs()
         val uri = Uri.parse(source.uri)
-        val input = contentResolver.openInputStream(uri)
-            ?: throw IllegalStateException("ファイルを開けません: ${source.displayName}")
-        input.use { from ->
-            target.outputStream().buffered().use { to -> from.copyTo(to) }
+        try {
+            val input = contentResolver.openInputStream(uri)
+                ?: throw IllegalStateException("ファイルを開けません")
+            input.use { from ->
+                target.outputStream().buffered().use { to -> from.copyTo(to) }
+            }
+        } catch (error: Throwable) {
+            target.delete()
+            val detail = error.message?.takeIf { it.isNotBlank() } ?: error.javaClass.simpleName
+            throw IOException("読み込みに失敗: ${source.displayName} ($detail)", error)
         }
     }
 
