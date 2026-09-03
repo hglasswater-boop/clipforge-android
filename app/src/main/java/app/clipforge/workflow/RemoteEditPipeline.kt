@@ -9,11 +9,20 @@ import java.io.File
 import java.util.Locale
 import java.util.UUID
 
+data class PreparedCutSession(
+    val remoteInput: String,
+    val localFile: File,
+    val durationMs: Long,
+    val keyframesMs: List<Long>
+)
+
 class RemoteEditPipeline(
     private val cacheRoot: File,
     private val smbClient: SmbClient,
     private val mediaEngine: FfmpegMediaEngine
 ) {
+    private val editSessionRoot = File(cacheRoot, "clipforge/edit")
+
     suspend fun concat(
         remoteInputs: List<String>,
         remoteOutput: String,
@@ -41,30 +50,68 @@ class RemoteEditPipeline(
         }
     }
 
-    suspend fun cut(
+    suspend fun prepareCut(
+        remoteInput: String,
+        onProgress: (String) -> Unit = {}
+    ): PreparedCutSession = withContext(Dispatchers.IO) {
+        ensureCacheCapacity(listOf(remoteInput))
+        val workDir = createEditWorkDir()
+        try {
+            val input = File(workDir, remoteInput.substringAfterLast('/'))
+            onProgress("編集用にSMBから取得中: ${remoteInput.substringAfterLast('/')}")
+            smbClient.download(remoteInput, input)
+            onProgress("動画情報を解析中")
+            val signature = mediaEngine.probe(input)
+            val durationMs = signature.durationMs
+                ?: throw IllegalStateException("動画の長さを取得できませんでした")
+            onProgress("キーフレームを解析中")
+            val keyframes = mediaEngine.keyframeTimesMs(input)
+            PreparedCutSession(remoteInput, input, durationMs, keyframes)
+        } catch (t: Throwable) {
+            workDir.deleteRecursively()
+            throw t
+        }
+    }
+
+    suspend fun cutPrepared(
+        localInputPath: String,
         remoteInput: String,
         remoteOutput: String,
         startMs: Long,
-        endMs: Long?,
+        endMs: Long,
         onProgress: (String) -> Unit = {}
     ) = withContext(Dispatchers.IO) {
         ensureSafeOutput(listOf(remoteInput), remoteOutput)
-        ensureCacheCapacity(listOf(remoteInput))
-
-        val workDir = createWorkDir()
+        val input = validatedPreparedFile(localInputPath)
+        val output = File(input.parentFile, ".clipforge-output-${System.nanoTime()}-${remoteOutput.substringAfterLast('/')}")
         try {
-            val input = File(workDir, remoteInput.substringAfterLast('/'))
-            val output = File(workDir, remoteOutput.substringAfterLast('/'))
-            onProgress("SMBから取得中")
-            smbClient.download(remoteInput, input)
             onProgress("無劣化でカット中")
             mediaEngine.cutLossless(LosslessCutRequest(input, output, startMs, endMs))
             onProgress("SMBへ保存中")
             smbClient.uploadAtomically(output, remoteOutput)
             onProgress("完了: $remoteOutput")
         } finally {
-            workDir.deleteRecursively()
+            output.delete()
         }
+    }
+
+    fun discardPrepared(localInputPath: String) {
+        runCatching {
+            val input = validatedPreparedFile(localInputPath)
+            input.parentFile?.deleteRecursively()
+        }
+    }
+
+    fun cleanupPreparedSessions() {
+        runCatching { editSessionRoot.deleteRecursively() }
+    }
+
+    private fun validatedPreparedFile(localInputPath: String): File {
+        val root = editSessionRoot.canonicalFile
+        val input = File(localInputPath).canonicalFile
+        val insideRoot = input.path.startsWith(root.path + File.separator)
+        require(insideRoot && input.isFile) { "編集用キャッシュが見つかりません" }
+        return input
     }
 
     private fun ensureSafeOutput(remoteInputs: List<String>, remoteOutput: String) {
@@ -106,4 +153,6 @@ class RemoteEditPipeline(
         String.format(Locale.US, "%.1f", bytes / (1024.0 * 1024.0 * 1024.0))
 
     private fun createWorkDir(): File = File(cacheRoot, "clipforge/${UUID.randomUUID()}").apply { mkdirs() }
+
+    private fun createEditWorkDir(): File = File(editSessionRoot, UUID.randomUUID().toString()).apply { mkdirs() }
 }

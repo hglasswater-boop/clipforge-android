@@ -7,6 +7,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
+import kotlin.math.roundToLong
 
 class FfmpegMediaEngine {
 
@@ -14,7 +15,7 @@ class FfmpegMediaEngine {
         val session = FFprobeKit.executeWithArguments(
             arrayOf(
                 "-v", "error",
-                "-show_entries", "format=format_name:stream=codec_type,codec_name,codec_tag_string,width,height,sample_rate,channels,time_base",
+                "-show_entries", "format=format_name,duration:stream=codec_type,codec_name,codec_tag_string,width,height,sample_rate,channels,time_base",
                 "-of", "json",
                 file.absolutePath
             )
@@ -24,12 +25,19 @@ class FfmpegMediaEngine {
         }
 
         val json = JSONObject(session.output)
-        val formats = json.optJSONObject("format")
+        val formatJson = json.optJSONObject("format")
+        val formats = formatJson
             ?.optString("format_name")
             .orEmpty()
             .split(',')
             .filter { it.isNotBlank() }
             .toSet()
+        val durationMs = formatJson
+            ?.optString("duration")
+            ?.toDoubleOrNull()
+            ?.takeIf { it.isFinite() && it > 0.0 }
+            ?.times(1000.0)
+            ?.roundToLong()
 
         val streamsJson = json.optJSONArray("streams")
         val streams = buildList {
@@ -51,7 +59,35 @@ class FfmpegMediaEngine {
                 }
             }
         }
-        MediaSignature(formats, streams)
+        MediaSignature(formats, streams, durationMs)
+    }
+
+    suspend fun keyframeTimesMs(file: File): List<Long> = withContext(Dispatchers.IO) {
+        val session = FFprobeKit.executeWithArguments(
+            arrayOf(
+                "-v", "error",
+                "-select_streams", "v:0",
+                "-skip_frame", "nokey",
+                "-show_frames",
+                "-show_entries", "frame=best_effort_timestamp_time",
+                "-of", "json",
+                file.absolutePath
+            )
+        )
+        if (!ReturnCode.isSuccess(session.returnCode)) return@withContext emptyList()
+
+        val frames = JSONObject(session.output).optJSONArray("frames") ?: return@withContext emptyList()
+        buildList {
+            for (index in 0 until frames.length()) {
+                frames.getJSONObject(index)
+                    .optString("best_effort_timestamp_time")
+                    .toDoubleOrNull()
+                    ?.takeIf { it.isFinite() && it >= 0.0 }
+                    ?.times(1000.0)
+                    ?.roundToLong()
+                    ?.let(::add)
+            }
+        }.distinct().sorted()
     }
 
     suspend fun cutLossless(request: LosslessCutRequest): File = withContext(Dispatchers.IO) {

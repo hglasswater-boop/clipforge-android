@@ -15,7 +15,8 @@ data class StreamSignature(
 
 data class MediaSignature(
     val formatNames: Set<String>,
-    val streams: List<StreamSignature>
+    val streams: List<StreamSignature>,
+    val durationMs: Long?
 )
 
 data class LosslessCutRequest(

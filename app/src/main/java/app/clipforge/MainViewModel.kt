@@ -8,10 +8,21 @@ import app.clipforge.smb.SmbClient
 import app.clipforge.smb.SmbConnection
 import app.clipforge.smb.SmbEntry
 import app.clipforge.workflow.RemoteEditPipeline
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlin.math.abs
+
+data class TrimEditorState(
+    val remotePath: String,
+    val localPath: String,
+    val durationMs: Long,
+    val startMs: Long,
+    val endMs: Long,
+    val keyframesMs: List<Long>
+)
 
 data class MainUiState(
     val connected: Boolean = false,
@@ -19,6 +30,7 @@ data class MainUiState(
     val currentPath: String = "",
     val entries: List<SmbEntry> = emptyList(),
     val selectedPaths: List<String> = emptyList(),
+    val trimEditor: TrimEditorState? = null,
     val status: String = "SMBへ接続してください",
     val error: String? = null
 )
@@ -73,25 +85,80 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun cutSelected(outputName: String, startSeconds: String, endSeconds: String) {
+    fun openTrimEditor() {
         val selected = _uiState.value.selectedPaths
         if (selected.size != 1) {
             showError("カットする動画を1本だけ選択してください")
             return
         }
-        val startMs = startSeconds.toDoubleOrNull()?.times(1000)?.toLong()
-        val endMs = endSeconds.takeIf { it.isNotBlank() }?.toDoubleOrNull()?.times(1000)?.toLong()
-        if (startMs == null || startMs < 0 || (endMs != null && endMs <= startMs)) {
-            showError("開始/終了秒を確認してください")
-            return
+        runTask("編集画面を準備中") {
+            val prepared = pipeline.prepareCut(selected.single()) { message ->
+                _uiState.update { it.copy(status = message) }
+            }
+            _uiState.update {
+                it.copy(
+                    trimEditor = TrimEditorState(
+                        remotePath = prepared.remoteInput,
+                        localPath = prepared.localFile.absolutePath,
+                        durationMs = prepared.durationMs,
+                        startMs = 0L,
+                        endMs = prepared.durationMs,
+                        keyframesMs = prepared.keyframesMs
+                    ),
+                    status = "範囲を選択してください"
+                )
+            }
         }
-        val inputExtension = selected.single().substringAfterLast('.', "mkv")
-        val output = validatedOutputPath(outputName, "cut.$inputExtension") ?: return
+    }
+
+    fun updateTrimRange(requestedStartMs: Long, requestedEndMs: Long): TrimEditorState? {
+        val editor = _uiState.value.trimEditor ?: return null
+        val duration = editor.durationMs.coerceAtLeast(1L)
+        val startCandidates = editor.keyframesMs.filter { it in 0 until duration }.ifEmpty { listOf(0L) }
+        val endCandidates = (editor.keyframesMs.filter { it in 1 until duration } + duration).distinct().sorted()
+
+        val start = nearest(startCandidates, requestedStartMs.coerceIn(0L, duration - 1L))
+        var end = nearest(endCandidates, requestedEndMs.coerceIn(1L, duration))
+        if (end <= start) {
+            end = endCandidates.firstOrNull { it > start } ?: duration
+        }
+        if (end <= start) return editor
+
+        val updated = editor.copy(startMs = start, endMs = end)
+        _uiState.update { it.copy(trimEditor = updated, error = null) }
+        return updated
+    }
+
+    fun applyTrim(outputName: String) {
+        val editor = _uiState.value.trimEditor ?: return
+        val originalName = editor.remotePath.substringAfterLast('/')
+        val extension = originalName.substringAfterLast('.', "mkv")
+        val baseName = originalName.substringBeforeLast('.', originalName)
+        val output = validatedOutputPath(outputName, "$baseName-cut.$extension") ?: return
+
         runTask("カットを開始") {
-            pipeline.cut(selected.single(), output, startMs, endMs) { message -> _uiState.update { it.copy(status = message) } }
+            pipeline.cutPrepared(
+                localInputPath = editor.localPath,
+                remoteInput = editor.remotePath,
+                remoteOutput = output,
+                startMs = editor.startMs,
+                endMs = editor.endMs
+            ) { message -> _uiState.update { it.copy(status = message) } }
+            pipeline.discardPrepared(editor.localPath)
+            _uiState.update { it.copy(trimEditor = null) }
             refreshAfterOperation()
         }
     }
+
+    fun cancelTrimEditor() {
+        if (_uiState.value.busy) return
+        val editor = _uiState.value.trimEditor ?: return
+        _uiState.update { it.copy(trimEditor = null, status = "編集をキャンセルしました", error = null) }
+        viewModelScope.launch(Dispatchers.IO) { pipeline.discardPrepared(editor.localPath) }
+    }
+
+    private fun nearest(candidates: List<Long>, target: Long): Long =
+        candidates.minByOrNull { abs(it - target) } ?: target
 
     private fun loadDirectory(path: String) {
         runTask("一覧を取得中") {
@@ -146,6 +213,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     override fun onCleared() {
+        pipeline.cleanupPreparedSessions()
         smb.close()
         super.onCleared()
     }
