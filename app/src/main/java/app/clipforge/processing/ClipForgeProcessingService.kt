@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.os.IBinder
 import android.os.PowerManager
 import app.clipforge.MainActivity
@@ -87,6 +88,7 @@ class ClipForgeProcessingService : Service() {
                 val detail = error.message?.takeIf { it.isNotBlank() } ?: error.javaClass.simpleName
                 finishFailure("処理に失敗しました: $detail")
             } finally {
+                releaseOutputGrant(request.getStringExtra(EXTRA_OUTPUT_URI))
                 releaseWakeLock()
                 stopSelf(startId)
             }
@@ -166,6 +168,16 @@ class ClipForgeProcessingService : Service() {
                 setReferenceCounted(false)
                 acquire()
             }
+    }
+
+    private fun releaseOutputGrant(uriString: String?) {
+        val uri = uriString?.let(Uri::parse) ?: return
+        runCatching {
+            contentResolver.releasePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+            )
+        }
     }
 
     private fun releaseWakeLock() {
