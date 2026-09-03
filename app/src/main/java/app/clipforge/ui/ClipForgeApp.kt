@@ -437,6 +437,7 @@ private fun SelectedVideoRow(
             Column(Modifier.weight(1f)) {
                 Text(
                     text = visibleName,
+                    minLines = 2,
                     maxLines = 2,
                     overflow = TextOverflow.Clip,
                     style = MaterialTheme.typography.bodyLarge,
@@ -458,15 +459,16 @@ private fun SelectedVideoRow(
                             ) { change, dragAmount ->
                                 change.consume()
                                 dragOffsetY += dragAmount.y
-                                val threshold = (rowHeightPx * 0.45f).coerceAtLeast(36.dp.toPx())
+                                val rowStep = rowHeightPx.takeIf { it > 0f } ?: 72.dp.toPx()
+                                val threshold = (rowStep * 0.5f).coerceAtLeast(36.dp.toPx())
                                 when {
                                     dragOffsetY <= -threshold && currentIndex > 0 -> {
                                         currentOnMove(video.uri, -1)
-                                        dragOffsetY += threshold
+                                        dragOffsetY += rowStep
                                     }
                                     dragOffsetY >= threshold && currentIndex < currentCount - 1 -> {
                                         currentOnMove(video.uri, 1)
-                                        dragOffsetY -= threshold
+                                        dragOffsetY -= rowStep
                                     }
                                 }
                             }
