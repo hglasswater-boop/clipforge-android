@@ -2,6 +2,7 @@ package app.clipforge.workflow
 
 import app.clipforge.media.FfmpegMediaEngine
 import app.clipforge.media.LosslessCutRequest
+import app.clipforge.media.TimelineThumbnailGenerator
 import app.clipforge.smb.SmbClient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -13,13 +14,15 @@ data class PreparedCutSession(
     val remoteInput: String,
     val localFile: File,
     val durationMs: Long,
-    val keyframesMs: List<Long>
+    val keyframesMs: List<Long>,
+    val thumbnailPaths: List<String>
 )
 
 class RemoteEditPipeline(
     private val cacheRoot: File,
     private val smbClient: SmbClient,
-    private val mediaEngine: FfmpegMediaEngine
+    private val mediaEngine: FfmpegMediaEngine,
+    private val thumbnailGenerator: TimelineThumbnailGenerator = TimelineThumbnailGenerator()
 ) {
     private val editSessionRoot = File(cacheRoot, "clipforge/edit")
 
@@ -70,7 +73,11 @@ class RemoteEditPipeline(
                 ?: throw IllegalStateException("動画の長さを取得できませんでした")
             onProgress("キーフレームを解析中")
             val keyframes = mediaEngine.keyframeTimesMs(input)
-            PreparedCutSession(remoteInput, input, durationMs, keyframes)
+            onProgress("タイムラインを作成中")
+            val thumbnails = thumbnailGenerator
+                .generate(input, File(workDir, "timeline"), durationMs)
+                .map { it.absolutePath }
+            PreparedCutSession(remoteInput, input, durationMs, keyframes, thumbnails)
         } catch (t: Throwable) {
             workDir.deleteRecursively()
             throw t

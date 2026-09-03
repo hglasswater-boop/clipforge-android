@@ -21,7 +21,8 @@ data class TrimEditorState(
     val durationMs: Long,
     val startMs: Long,
     val endMs: Long,
-    val keyframesMs: List<Long>
+    val keyframesMs: List<Long>,
+    val thumbnailPaths: List<String>
 )
 
 data class MainUiState(
@@ -103,7 +104,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         durationMs = prepared.durationMs,
                         startMs = 0L,
                         endMs = prepared.durationMs,
-                        keyframesMs = prepared.keyframesMs
+                        keyframesMs = prepared.keyframesMs,
+                        thumbnailPaths = prepared.thumbnailPaths
                     ),
                     status = "範囲を選択してください"
                 )
