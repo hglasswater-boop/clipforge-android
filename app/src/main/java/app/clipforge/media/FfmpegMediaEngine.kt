@@ -14,19 +14,54 @@ data class NamedMediaPath(
     val displayName: String,
 )
 
+data class NamedMediaDescriptor(
+    val fd: Int,
+    val displayName: String,
+)
+
+data class NamedMediaSignature(
+    val displayName: String,
+    val signature: MediaSignature,
+)
+
+internal fun fdConcatScript(inputs: List<NamedMediaDescriptor>): String = buildString {
+    appendLine("ffconcat version 1.0")
+    inputs.forEach { input ->
+        appendLine("file 'fd:'")
+        appendLine("option fd ${input.fd}")
+    }
+}
+
 class FfmpegMediaEngine {
 
     suspend fun probe(file: File): MediaSignature = probePath(file.absolutePath, file.name)
 
     suspend fun probePath(path: String, displayName: String = path): MediaSignature = withContext(Dispatchers.IO) {
-        val session = FFprobeKit.executeWithArguments(
-            arrayOf(
-                "-v", "error",
-                "-show_entries", "format=format_name,duration:stream=codec_type,codec_name,codec_tag_string,width,height,sample_rate,channels,time_base",
-                "-of", "json",
-                path,
-            ),
+        probeWithArguments(
+            inputArguments = listOf(path),
+            displayName = displayName,
         )
+    }
+
+    /**
+     * Probe an already-open, seekable Android descriptor. FFmpeg's fd: protocol dup()s this fd,
+     * so ownership stays with the caller and no /proc/self/fd path has to be reopened.
+     */
+    suspend fun probeDescriptor(fd: Int, displayName: String): MediaSignature = withContext(Dispatchers.IO) {
+        probeWithArguments(
+            inputArguments = listOf("-fd", fd.toString(), "fd:"),
+            displayName = displayName,
+        )
+    }
+
+    private fun probeWithArguments(inputArguments: List<String>, displayName: String): MediaSignature {
+        val arguments = mutableListOf(
+            "-v", "error",
+            "-show_entries", "format=format_name,duration:stream=codec_type,codec_name,codec_tag_string,width,height,sample_rate,channels,time_base",
+            "-of", "json",
+        )
+        arguments += inputArguments
+        val session = FFprobeKit.executeWithArguments(arguments.toTypedArray())
         if (!ReturnCode.isSuccess(session.returnCode)) {
             throw MediaCommandException(session.allLogsAsString.ifBlank { "ffprobe failed: $displayName" })
         }
@@ -66,7 +101,7 @@ class FfmpegMediaEngine {
                 }
             }
         }
-        MediaSignature(formats, streams, durationMs)
+        return MediaSignature(formats, streams, durationMs)
     }
 
     suspend fun keyframeTimesMs(file: File): List<Long> = withContext(Dispatchers.IO) {
@@ -138,6 +173,36 @@ class FfmpegMediaEngine {
         runFfmpeg(args)
     }
 
+    suspend fun cutLosslessToDescriptor(
+        inputPath: String,
+        outputFd: Int,
+        outputName: String,
+        startMs: Long,
+        endMs: Long?,
+    ) = withContext(Dispatchers.IO) {
+        require(startMs >= 0) { "startMs must be >= 0" }
+        require(endMs == null || endMs > startMs) { "endMs must be greater than startMs" }
+
+        val args = mutableListOf(
+            "-hide_banner", "-y",
+            "-noaccurate_seek",
+            "-ss", seconds(startMs),
+            "-i", inputPath,
+        )
+        endMs?.let { end ->
+            args += listOf("-t", seconds(end - startMs))
+        }
+        args += listOf(
+            "-map", "0",
+            "-c", "copy",
+            "-avoid_negative_ts", "make_zero",
+            "-f", muxerFor(outputName),
+            "-fd", outputFd.toString(),
+            "fd:",
+        )
+        runFfmpeg(args)
+    }
+
     suspend fun concatLossless(inputs: List<File>, output: File): File = withContext(Dispatchers.IO) {
         require(inputs.size >= 2) { "At least two files are required" }
         output.parentFile?.mkdirs()
@@ -154,12 +219,21 @@ class FfmpegMediaEngine {
         inputs: List<NamedMediaPath>,
     ) = withContext(Dispatchers.IO) {
         require(inputs.size >= 2) { "At least two files are required" }
-        val signatures = inputs.map { probePath(it.path, it.displayName) }
-        val expected = signatures.first().streams
-        signatures.drop(1).forEachIndexed { index, signature ->
-            if (signature.streams != expected) {
+        val signatures = inputs.map { input ->
+            NamedMediaSignature(input.displayName, probePath(input.path, input.displayName))
+        }
+        requireLosslessConcatCompatibility(signatures)
+    }
+
+    fun requireLosslessConcatCompatibility(
+        inputs: List<NamedMediaSignature>,
+    ) {
+        require(inputs.size >= 2) { "At least two files are required" }
+        val expected = inputs.first().signature.streams
+        inputs.drop(1).forEach { input ->
+            if (input.signature.streams != expected) {
                 throw IncompatibleMediaException(
-                    "${inputs[index + 1].displayName} has a different stream layout/codec. " +
+                    "${input.displayName} has a different stream layout/codec. " +
                         "ClipForge will not silently re-encode it.",
                 )
             }
@@ -181,11 +255,6 @@ class FfmpegMediaEngine {
         )
     }
 
-    /**
-     * Runs concat after compatibility has already been verified. This split is required for
-     * FFmpegKit SAF urls because each SAF id is removed when FFprobe/FFmpeg closes it, making the
-     * url intentionally single-use.
-     */
     suspend fun concatLosslessPathsValidated(
         inputs: List<NamedMediaPath>,
         outputPath: String,
@@ -200,9 +269,6 @@ class FfmpegMediaEngine {
             runFfmpeg(
                 listOf(
                     "-hide_banner", "-y",
-                    // The concat demuxer restricts nested protocols by default. Direct XFiles/SMB
-                    // inputs use FFmpegKit's custom saf: protocol, so explicitly allow it.
-                    "-protocol_whitelist", "file,saf,crypto,data",
                     "-f", "concat",
                     "-safe", "0",
                     "-i", listFile.absolutePath,
@@ -211,6 +277,43 @@ class FfmpegMediaEngine {
                     "-fflags", "+genpts",
                     "-f", muxerFor(outputName),
                     outputPath,
+                ),
+            )
+        } finally {
+            listFile.delete()
+        }
+    }
+
+    /**
+     * Lossless concat over already-open seekable descriptors. The ffconcat `option fd` directive
+     * lets each entry select its own descriptor while FFmpeg's fd: protocol dup()s the supplied fd.
+     * This keeps descriptor ownership in Kotlin, avoids Android procfs/SELinux, and avoids the old
+     * FFmpegKit saf: JNI worker-thread bug.
+     */
+    suspend fun concatLosslessDescriptorsValidated(
+        inputs: List<NamedMediaDescriptor>,
+        outputFd: Int,
+        outputName: String,
+        workingDirectory: File,
+    ) = withContext(Dispatchers.IO) {
+        require(inputs.size >= 2) { "At least two files are required" }
+        workingDirectory.mkdirs()
+        val listFile = File(workingDirectory, ".clipforge-concat-${System.nanoTime()}.ffconcat")
+        try {
+            listFile.writeText(fdConcatScript(inputs))
+            runFfmpeg(
+                listOf(
+                    "-hide_banner", "-y",
+                    "-protocol_whitelist", "file,fd,crypto,data",
+                    "-f", "concat",
+                    "-safe", "0",
+                    "-i", listFile.absolutePath,
+                    "-map", "0",
+                    "-c", "copy",
+                    "-fflags", "+genpts",
+                    "-f", muxerFor(outputName),
+                    "-fd", outputFd.toString(),
+                    "fd:",
                 ),
             )
         } finally {
