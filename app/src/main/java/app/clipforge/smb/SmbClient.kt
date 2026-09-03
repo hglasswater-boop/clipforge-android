@@ -77,6 +77,13 @@ class SmbClient : Closeable {
         }
     }
 
+    fun exists(remotePath: String): Boolean = resource(remotePath).use { it.exists() }
+
+    fun size(remotePath: String): Long = resource(remotePath).use { remote ->
+        require(remote.isFile) { "Not a file: $remotePath" }
+        remote.length()
+    }
+
     fun download(remotePath: String, localFile: File) {
         localFile.parentFile?.mkdirs()
         resource(remotePath).use { remote ->
@@ -95,7 +102,11 @@ class SmbClient : Closeable {
                 temp.openOutputStream().use { output ->
                     localFile.inputStream().buffered(1024 * 1024).use { input -> input.copyTo(output, 1024 * 1024) }
                 }
-                resource(finalPath).use { destination -> temp.renameTo(destination, true) }
+                resource(finalPath).use { destination ->
+                    // Never silently replace an existing remote file. This also closes the
+                    // race between the preflight exists() check and the final SMB rename.
+                    temp.renameTo(destination, false)
+                }
             } catch (t: Throwable) {
                 runCatching { if (temp.exists()) temp.delete() }
                 throw t

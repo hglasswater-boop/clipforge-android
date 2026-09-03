@@ -63,10 +63,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun concatSelected(outputName: String) {
         val selected = _uiState.value.selectedPaths
         if (selected.size < 2) {
-            _uiState.update { it.copy(error = "結合するMP4/MKVを2本以上選択してください") }
+            showError("結合するMP4/MKVを2本以上選択してください")
             return
         }
-        val output = outputPath(outputName.ifBlank { "merged.mkv" })
+        val output = validatedOutputPath(outputName, "merged.mkv") ?: return
         runTask("結合を開始") {
             pipeline.concat(selected, output) { message -> _uiState.update { it.copy(status = message) } }
             refreshAfterOperation()
@@ -76,17 +76,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun cutSelected(outputName: String, startSeconds: String, endSeconds: String) {
         val selected = _uiState.value.selectedPaths
         if (selected.size != 1) {
-            _uiState.update { it.copy(error = "カットする動画を1本だけ選択してください") }
+            showError("カットする動画を1本だけ選択してください")
             return
         }
         val startMs = startSeconds.toDoubleOrNull()?.times(1000)?.toLong()
         val endMs = endSeconds.takeIf { it.isNotBlank() }?.toDoubleOrNull()?.times(1000)?.toLong()
         if (startMs == null || startMs < 0 || (endMs != null && endMs <= startMs)) {
-            _uiState.update { it.copy(error = "開始/終了秒を確認してください") }
+            showError("開始/終了秒を確認してください")
             return
         }
         val inputExtension = selected.single().substringAfterLast('.', "mkv")
-        val output = outputPath(outputName.ifBlank { "cut.$inputExtension" })
+        val output = validatedOutputPath(outputName, "cut.$inputExtension") ?: return
         runTask("カットを開始") {
             pipeline.cut(selected.single(), output, startMs, endMs) { message -> _uiState.update { it.copy(status = message) } }
             refreshAfterOperation()
@@ -105,9 +105,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update { it.copy(entries = smb.list(path), selectedPaths = emptyList()) }
     }
 
-    private fun outputPath(name: String): String {
-        val safe = name.substringAfterLast('/').ifBlank { "output.mkv" }
-        return _uiState.value.currentPath + safe
+    private fun validatedOutputPath(requestedName: String, fallbackName: String): String? {
+        val name = requestedName.trim().ifBlank { fallbackName }
+        val invalidCharacters = charArrayOf('/', '\\', ':', '*', '?', '"', '<', '>', '|')
+        if (
+            name == "." ||
+            name == ".." ||
+            name.endsWith('.') ||
+            name.endsWith(' ') ||
+            name.any { it.code < 32 || it in invalidCharacters }
+        ) {
+            showError("出力ファイル名に使用できない文字が含まれています")
+            return null
+        }
+
+        val extension = name.substringAfterLast('.', "").lowercase()
+        if (extension != "mp4" && extension != "mkv") {
+            showError("出力形式は .mp4 または .mkv を指定してください")
+            return null
+        }
+        return _uiState.value.currentPath + name
+    }
+
+    private fun showError(message: String) {
+        _uiState.update { it.copy(error = message) }
     }
 
     private fun runTask(initialStatus: String, block: suspend () -> Unit) {

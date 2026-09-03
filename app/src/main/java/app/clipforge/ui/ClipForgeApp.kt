@@ -53,7 +53,7 @@ private fun ClipForgeScreen(viewModel: MainViewModel) {
     var domain by remember { mutableStateOf("") }
     var username by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
-    var outputName by remember { mutableStateOf("merged.mkv") }
+    var outputName by remember { mutableStateOf("") }
     var startSeconds by remember { mutableStateOf("0") }
     var endSeconds by remember { mutableStateOf("") }
 
@@ -85,8 +85,14 @@ private fun ClipForgeScreen(viewModel: MainViewModel) {
                     }
                 }
                 items(state.entries, key = { it.path }) { entry ->
-                    RemoteEntryRow(entry, entry.path in state.selectedPaths, !state.busy,
-                        onOpen = { viewModel.openDirectory(entry) }, onToggle = { viewModel.toggleSelection(entry) })
+                    val selectionOrder = state.selectedPaths.indexOf(entry.path).takeIf { it >= 0 }?.plus(1)
+                    RemoteEntryRow(
+                        entry = entry,
+                        selectionOrder = selectionOrder,
+                        enabled = !state.busy,
+                        onOpen = { viewModel.openDirectory(entry) },
+                        onToggle = { viewModel.toggleSelection(entry) }
+                    )
                 }
                 item {
                     EditCard(
@@ -137,7 +143,14 @@ private fun ConnectionCard(
 }
 
 @Composable
-private fun RemoteEntryRow(entry: SmbEntry, selected: Boolean, enabled: Boolean, onOpen: () -> Unit, onToggle: () -> Unit) {
+private fun RemoteEntryRow(
+    entry: SmbEntry,
+    selectionOrder: Int?,
+    enabled: Boolean,
+    onOpen: () -> Unit,
+    onToggle: () -> Unit
+) {
+    val selected = selectionOrder != null
     Row(
         Modifier.fillMaxWidth().clickable(enabled = enabled) { if (entry.directory) onOpen() else if (entry.isVideo) onToggle() }.padding(vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -147,7 +160,10 @@ private fun RemoteEntryRow(entry: SmbEntry, selected: Boolean, enabled: Boolean,
             Text(entry.name)
             if (!entry.directory) Text(formatBytes(entry.size), style = MaterialTheme.typography.bodySmall)
         }
-        if (entry.isVideo) Checkbox(selected, onCheckedChange = { onToggle() }, enabled = enabled)
+        if (entry.isVideo) {
+            selectionOrder?.let { Text("#$it", style = MaterialTheme.typography.labelLarge) }
+            Checkbox(selected, onCheckedChange = { onToggle() }, enabled = enabled)
+        }
     }
     HorizontalDivider()
 }
@@ -162,7 +178,17 @@ private fun EditCard(
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("編集", style = MaterialTheme.typography.titleMedium)
             Text("選択: ${selectedCount}本")
-            OutlinedTextField(outputName, onOutputName, Modifier.fillMaxWidth(), label = { Text("出力ファイル名 (.mp4 / .mkv)") }, enabled = enabled)
+            if (selectedCount >= 2) {
+                Text("結合順は一覧の #1 → #2 → … の順です。選び直すと順番を変更できます。", style = MaterialTheme.typography.bodySmall)
+            }
+            OutlinedTextField(
+                outputName,
+                onOutputName,
+                Modifier.fillMaxWidth(),
+                label = { Text("出力ファイル名 (.mp4 / .mkv)") },
+                placeholder = { Text("空欄なら自動命名") },
+                enabled = enabled
+            )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(startSeconds, onStart, Modifier.weight(1f), label = { Text("開始 秒") }, enabled = enabled,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
@@ -174,7 +200,7 @@ private fun EditCard(
                 Button(onClick = onCut, enabled = enabled && selectedCount == 1) { Text("無劣化でカット") }
             }
             Text(
-                "無劣化カットは再エンコードしないため、映像の開始位置は最寄りのキーフレーム境界になります。フレーム単位の完全一致には再エンコードが必要です。",
+                "既存ファイルは上書きしません。無劣化カットは再エンコードしないため、映像の開始位置は最寄りのキーフレーム境界になります。フレーム単位の完全一致には再エンコードが必要です。",
                 style = MaterialTheme.typography.bodySmall
             )
         }
