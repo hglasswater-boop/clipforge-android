@@ -24,14 +24,14 @@ Android向けの **MP4 / MKV 無劣化カット・結合ツール**。SMB共有�
 ## 技術構成
 
 - Kotlin / Jetpack Compose
-- Android Gradle Plugin 9.4 / compileSdk 37
+- Android Gradle Plugin 9.4 / compileSdk 36 / targetSdk 36
 - `dev.ffmpegkit-maintained:ffmpeg-kit-min:8.1.7`
 - `eu.agno3.jcifs:jcifs-ng:2.1.10`
 - minSdk 26
 
 ## 開発
 
-JDK 17 と Android SDK 37 が必要です。
+JDK 17 と Android SDK 36 が必要です。
 
 ```bash
 gradle :app:assembleDebug

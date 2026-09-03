@@ -1,10 +1,5 @@
 package app.clipforge.ui
 
-import android.Manifest
-import android.content.pm.PackageManager
-import android.os.Build
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -35,7 +30,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
@@ -53,7 +47,6 @@ fun ClipForgeApp(viewModel: MainViewModel) {
 
 @Composable
 private fun ClipForgeScreen(viewModel: MainViewModel) {
-    val context = LocalContext.current
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     var host by remember { mutableStateOf("") }
     var share by remember { mutableStateOf("") }
@@ -63,29 +56,6 @@ private fun ClipForgeScreen(viewModel: MainViewModel) {
     var outputName by remember { mutableStateOf("merged.mkv") }
     var startSeconds by remember { mutableStateOf("0") }
     var endSeconds by remember { mutableStateOf("") }
-    var permissionError by remember { mutableStateOf<String?>(null) }
-
-    val localNetworkPermissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        if (granted) {
-            permissionError = null
-            viewModel.connect(host, share, domain, username, password)
-        } else {
-            permissionError = "SMB接続にはローカルネットワークへのアクセス許可が必要です"
-        }
-    }
-
-    fun connectWithPermission() {
-        val needsPermission = Build.VERSION.SDK_INT >= 37 &&
-            context.checkSelfPermission(Manifest.permission.ACCESS_LOCAL_NETWORK) != PackageManager.PERMISSION_GRANTED
-        if (needsPermission) {
-            localNetworkPermissionLauncher.launch(Manifest.permission.ACCESS_LOCAL_NETWORK)
-        } else {
-            permissionError = null
-            viewModel.connect(host, share, domain, username, password)
-        }
-    }
 
     Scaffold { padding ->
         LazyColumn(
@@ -100,20 +70,11 @@ private fun ClipForgeScreen(viewModel: MainViewModel) {
 
             if (!state.connected) {
                 item {
-                    ConnectionCard(
-                        host = host,
-                        share = share,
-                        domain = domain,
-                        username = username,
-                        password = password,
-                        permissionError = permissionError,
-                        onHost = { host = it },
-                        onShare = { share = it },
-                        onDomain = { domain = it },
-                        onUsername = { username = it },
-                        onPassword = { password = it },
+                    ConnectionCard(host, share, domain, username, password,
+                        onHost = { host = it }, onShare = { share = it }, onDomain = { domain = it },
+                        onUsername = { username = it }, onPassword = { password = it },
                         enabled = !state.busy,
-                        onConnect = ::connectWithPermission
+                        onConnect = { viewModel.connect(host, share, domain, username, password) }
                     )
                 }
             } else {
@@ -124,13 +85,8 @@ private fun ClipForgeScreen(viewModel: MainViewModel) {
                     }
                 }
                 items(state.entries, key = { it.path }) { entry ->
-                    RemoteEntryRow(
-                        entry = entry,
-                        selected = entry.path in state.selectedPaths,
-                        enabled = !state.busy,
-                        onOpen = { viewModel.openDirectory(entry) },
-                        onToggle = { viewModel.toggleSelection(entry) }
-                    )
+                    RemoteEntryRow(entry, entry.path in state.selectedPaths, !state.busy,
+                        onOpen = { viewModel.openDirectory(entry) }, onToggle = { viewModel.toggleSelection(entry) })
                 }
                 item {
                     EditCard(
@@ -160,19 +116,10 @@ private fun ClipForgeScreen(viewModel: MainViewModel) {
 
 @Composable
 private fun ConnectionCard(
-    host: String,
-    share: String,
-    domain: String,
-    username: String,
-    password: String,
-    permissionError: String?,
-    onHost: (String) -> Unit,
-    onShare: (String) -> Unit,
-    onDomain: (String) -> Unit,
-    onUsername: (String) -> Unit,
-    onPassword: (String) -> Unit,
-    enabled: Boolean,
-    onConnect: () -> Unit
+    host: String, share: String, domain: String, username: String, password: String,
+    onHost: (String) -> Unit, onShare: (String) -> Unit, onDomain: (String) -> Unit,
+    onUsername: (String) -> Unit, onPassword: (String) -> Unit,
+    enabled: Boolean, onConnect: () -> Unit
 ) {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -181,16 +128,9 @@ private fun ConnectionCard(
             OutlinedTextField(share, onShare, Modifier.fillMaxWidth(), label = { Text("共有名") }, enabled = enabled)
             OutlinedTextField(domain, onDomain, Modifier.fillMaxWidth(), label = { Text("ドメイン（任意）") }, enabled = enabled)
             OutlinedTextField(username, onUsername, Modifier.fillMaxWidth(), label = { Text("ユーザー名") }, enabled = enabled)
-            OutlinedTextField(
-                password,
-                onPassword,
-                Modifier.fillMaxWidth(),
-                label = { Text("パスワード") },
-                enabled = enabled,
-                visualTransformation = PasswordVisualTransformation()
-            )
+            OutlinedTextField(password, onPassword, Modifier.fillMaxWidth(), label = { Text("パスワード") }, enabled = enabled,
+                visualTransformation = PasswordVisualTransformation())
             Button(onClick = onConnect, enabled = enabled && host.isNotBlank() && share.isNotBlank()) { Text("接続") }
-            permissionError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             Text("SMB1は使わず、SMB2.02〜SMB3.11で接続します。", style = MaterialTheme.typography.bodySmall)
         }
     }
@@ -199,9 +139,7 @@ private fun ConnectionCard(
 @Composable
 private fun RemoteEntryRow(entry: SmbEntry, selected: Boolean, enabled: Boolean, onOpen: () -> Unit, onToggle: () -> Unit) {
     Row(
-        Modifier.fillMaxWidth()
-            .clickable(enabled = enabled) { if (entry.directory) onOpen() else if (entry.isVideo) onToggle() }
-            .padding(vertical = 10.dp),
+        Modifier.fillMaxWidth().clickable(enabled = enabled) { if (entry.directory) onOpen() else if (entry.isVideo) onToggle() }.padding(vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(if (entry.directory) "📁" else "🎞️", modifier = Modifier.padding(end = 10.dp))
@@ -216,16 +154,9 @@ private fun RemoteEntryRow(entry: SmbEntry, selected: Boolean, enabled: Boolean,
 
 @Composable
 private fun EditCard(
-    selectedCount: Int,
-    outputName: String,
-    startSeconds: String,
-    endSeconds: String,
-    enabled: Boolean,
-    onOutputName: (String) -> Unit,
-    onStart: (String) -> Unit,
-    onEnd: (String) -> Unit,
-    onConcat: () -> Unit,
-    onCut: () -> Unit
+    selectedCount: Int, outputName: String, startSeconds: String, endSeconds: String, enabled: Boolean,
+    onOutputName: (String) -> Unit, onStart: (String) -> Unit, onEnd: (String) -> Unit,
+    onConcat: () -> Unit, onCut: () -> Unit
 ) {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -233,22 +164,10 @@ private fun EditCard(
             Text("選択: ${selectedCount}本")
             OutlinedTextField(outputName, onOutputName, Modifier.fillMaxWidth(), label = { Text("出力ファイル名 (.mp4 / .mkv)") }, enabled = enabled)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(
-                    startSeconds,
-                    onStart,
-                    Modifier.weight(1f),
-                    label = { Text("開始 秒") },
-                    enabled = enabled,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal)
-                )
-                OutlinedTextField(
-                    endSeconds,
-                    onEnd,
-                    Modifier.weight(1f),
-                    label = { Text("終了 秒（空=末尾）") },
-                    enabled = enabled,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal)
-                )
+                OutlinedTextField(startSeconds, onStart, Modifier.weight(1f), label = { Text("開始 秒") }, enabled = enabled,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
+                OutlinedTextField(endSeconds, onEnd, Modifier.weight(1f), label = { Text("終了 秒（空=末尾）") }, enabled = enabled,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = onConcat, enabled = enabled && selectedCount >= 2) { Text("無劣化で結合") }
