@@ -36,12 +36,13 @@ class ClipForgeProcessingService : Service() {
         if (processingJob?.isActive == true) return START_NOT_STICKY
 
         val title = when (request.action) {
+            ACTION_PREPARE_CUT -> "カット編集を準備中"
             ACTION_CONCAT -> "動画を結合中"
             ACTION_CUT -> "動画をカット中"
             else -> return START_NOT_STICKY
         }
         updateProgress(title, "処理を準備しています")
-        startForeground(NOTIFICATION_ID, buildNotification(title, "処理を準備しています", true))
+        startForeground(NOTIFICATION_ID, buildNotification(title, "処理を準備しています", true, null))
         acquireWakeLock()
 
         processingJob = serviceScope.launch {
@@ -52,38 +53,10 @@ class ClipForgeProcessingService : Service() {
             )
             try {
                 when (request.action) {
-                    ACTION_CONCAT -> {
-                        val uris = request.getStringArrayListExtra(EXTRA_INPUT_URIS).orEmpty()
-                        val names = request.getStringArrayListExtra(EXTRA_INPUT_NAMES).orEmpty()
-                        require(uris.size >= 2 && uris.size == names.size) { "結合する動画情報が不足しています" }
-                        val inputs = uris.indices.map { index ->
-                            PickedVideo(uri = uris[index], displayName = names[index])
-                        }
-                        val outputUri = requireNotNull(request.getStringExtra(EXTRA_OUTPUT_URI))
-                        val outputName = requireNotNull(request.getStringExtra(EXTRA_OUTPUT_NAME))
-                        pipeline.concatDirect(
-                            inputs = inputs,
-                            outputUri = outputUri,
-                            outputName = outputName,
-                        ) { message -> updateProgress(title, message) }
-                    }
-                    ACTION_CUT -> {
-                        val localInput = requireNotNull(request.getStringExtra(EXTRA_LOCAL_INPUT))
-                        val outputUri = requireNotNull(request.getStringExtra(EXTRA_OUTPUT_URI))
-                        val outputName = requireNotNull(request.getStringExtra(EXTRA_OUTPUT_NAME))
-                        val startMs = request.getLongExtra(EXTRA_START_MS, -1L)
-                        val endMs = request.getLongExtra(EXTRA_END_MS, -1L)
-                        require(startMs >= 0L && endMs > startMs) { "カット範囲が不正です" }
-                        pipeline.cutPreparedDirect(
-                            localInputPath = localInput,
-                            outputUri = outputUri,
-                            outputName = outputName,
-                            startMs = startMs,
-                            endMs = endMs,
-                        ) { message -> updateProgress(title, message) }
-                    }
+                    ACTION_PREPARE_CUT -> prepareCut(request, title, pipeline)
+                    ACTION_CONCAT -> concat(request, title, pipeline)
+                    ACTION_CUT -> cut(request, title, pipeline)
                 }
-                finishSuccess("処理が完了しました")
             } catch (error: Throwable) {
                 val detail = error.message?.takeIf { it.isNotBlank() } ?: error.javaClass.simpleName
                 finishFailure("処理に失敗しました: $detail")
@@ -96,6 +69,94 @@ class ClipForgeProcessingService : Service() {
         return START_NOT_STICKY
     }
 
+    private suspend fun prepareCut(
+        request: Intent,
+        title: String,
+        pipeline: ExternalEditPipeline,
+    ) {
+        val source = sourceFrom(request)
+        val prepared = pipeline.prepareCut(source) { message, percent ->
+            updateProgress(title, message, percent)
+        }
+        ProcessingStateStore.cutPrepared(
+            sourceUri = prepared.source.uri,
+            sourceName = prepared.source.displayName,
+            sessionPath = prepared.sessionDir.absolutePath,
+            localPath = prepared.localFile?.absolutePath,
+            durationMs = prepared.durationMs,
+            thumbnailPaths = prepared.thumbnailPaths,
+        )
+        finishPrepared("カット編集の準備が完了しました")
+    }
+
+    private suspend fun concat(
+        request: Intent,
+        title: String,
+        pipeline: ExternalEditPipeline,
+    ) {
+        val uris = request.getStringArrayListExtra(EXTRA_INPUT_URIS).orEmpty()
+        val names = request.getStringArrayListExtra(EXTRA_INPUT_NAMES).orEmpty()
+        require(uris.size >= 2 && uris.size == names.size) { "結合する動画情報が不足しています" }
+        val inputs = uris.indices.map { index ->
+            PickedVideo(uri = uris[index], displayName = names[index])
+        }
+        val outputUri = requireNotNull(request.getStringExtra(EXTRA_OUTPUT_URI))
+        val outputName = requireNotNull(request.getStringExtra(EXTRA_OUTPUT_NAME))
+        pipeline.concatDirect(
+            inputs = inputs,
+            outputUri = outputUri,
+            outputName = outputName,
+        ) { message -> updateProgress(title, message) }
+        finishSuccess("処理が完了しました")
+    }
+
+    private suspend fun cut(
+        request: Intent,
+        title: String,
+        pipeline: ExternalEditPipeline,
+    ) {
+        val source = sourceFrom(request)
+        val sessionPath = requireNotNull(request.getStringExtra(EXTRA_SESSION_PATH))
+        val localInput = request.getStringExtra(EXTRA_LOCAL_INPUT)
+        val outputUri = requireNotNull(request.getStringExtra(EXTRA_OUTPUT_URI))
+        val outputName = requireNotNull(request.getStringExtra(EXTRA_OUTPUT_NAME))
+        val startMs = request.getLongExtra(EXTRA_START_MS, -1L)
+        val endMs = request.getLongExtra(EXTRA_END_MS, -1L)
+        require(startMs >= 0L && endMs > startMs) { "カット範囲が不正です" }
+
+        if (localInput != null) {
+            pipeline.cutPreparedDirect(
+                localInputPath = localInput,
+                sessionPath = sessionPath,
+                outputUri = outputUri,
+                outputName = outputName,
+                startMs = startMs,
+                endMs = endMs,
+            ) { message -> updateProgress(title, message) }
+        } else {
+            pipeline.cutSourceDirect(
+                source = source,
+                sessionPath = sessionPath,
+                outputUri = outputUri,
+                outputName = outputName,
+                startMs = startMs,
+                endMs = endMs,
+            ) { message -> updateProgress(title, message) }
+        }
+        finishSuccess("処理が完了しました")
+    }
+
+    private fun sourceFrom(request: Intent): PickedVideo {
+        val sourceUri = requireNotNull(request.getStringExtra(EXTRA_INPUT_URI))
+        val sourceName = requireNotNull(request.getStringExtra(EXTRA_INPUT_NAME))
+        val sourceSize = request.getLongExtra(EXTRA_INPUT_SIZE_BYTES, -1L).takeIf { it >= 0L }
+        return PickedVideo(
+            uri = sourceUri,
+            displayName = sourceName,
+            sizeBytes = sourceSize,
+        )
+    }
+
     override fun onDestroy() {
         processingJob?.cancel()
         releaseWakeLock()
@@ -105,27 +166,38 @@ class ClipForgeProcessingService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    private fun updateProgress(title: String, message: String) {
-        ProcessingStateStore.running(title, message)
+    private fun updateProgress(title: String, message: String, progressPercent: Int? = null) {
+        ProcessingStateStore.running(title, message, progressPercent)
         getSystemService(NotificationManager::class.java)
-            .notify(NOTIFICATION_ID, buildNotification(title, message, true))
+            .notify(NOTIFICATION_ID, buildNotification(title, message, true, progressPercent))
+    }
+
+    private fun finishPrepared(message: String) {
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        getSystemService(NotificationManager::class.java)
+            .notify(NOTIFICATION_ID, buildNotification("ClipForge", message, false, 100))
     }
 
     private fun finishSuccess(message: String) {
         ProcessingStateStore.success(message)
         stopForeground(STOP_FOREGROUND_REMOVE)
         getSystemService(NotificationManager::class.java)
-            .notify(NOTIFICATION_ID, buildNotification("ClipForge", message, false))
+            .notify(NOTIFICATION_ID, buildNotification("ClipForge", message, false, 100))
     }
 
     private fun finishFailure(message: String) {
         ProcessingStateStore.failure(message)
         stopForeground(STOP_FOREGROUND_REMOVE)
         getSystemService(NotificationManager::class.java)
-            .notify(NOTIFICATION_ID, buildNotification("ClipForge", message, false))
+            .notify(NOTIFICATION_ID, buildNotification("ClipForge", message, false, null))
     }
 
-    private fun buildNotification(title: String, message: String, ongoing: Boolean): Notification {
+    private fun buildNotification(
+        title: String,
+        message: String,
+        ongoing: Boolean,
+        progressPercent: Int?,
+    ): Notification {
         val openIntent = Intent(this, MainActivity::class.java)
             .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
         val pending = PendingIntent.getActivity(
@@ -134,7 +206,7 @@ class ClipForgeProcessingService : Service() {
             openIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        return Notification.Builder(this, CHANNEL_ID)
+        val builder = Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_sys_upload)
             .setContentTitle(title)
             .setContentText(message)
@@ -143,9 +215,14 @@ class ClipForgeProcessingService : Service() {
             .setOngoing(ongoing)
             .setOnlyAlertOnce(ongoing)
             .setCategory(Notification.CATEGORY_PROGRESS)
-            .setProgress(0, 0, ongoing)
             .setAutoCancel(!ongoing)
-            .build()
+
+        if (progressPercent != null) {
+            builder.setProgress(100, progressPercent.coerceIn(0, 100), false)
+        } else {
+            builder.setProgress(0, 0, ongoing)
+        }
+        return builder.build()
     }
 
     private fun createNotificationChannel() {
@@ -190,15 +267,27 @@ class ClipForgeProcessingService : Service() {
     companion object {
         private const val CHANNEL_ID = "clipforge_processing"
         private const val NOTIFICATION_ID = 4101
+        private const val ACTION_PREPARE_CUT = "app.clipforge.action.PREPARE_CUT"
         private const val ACTION_CONCAT = "app.clipforge.action.CONCAT"
         private const val ACTION_CUT = "app.clipforge.action.CUT"
+        private const val EXTRA_INPUT_URI = "inputUri"
+        private const val EXTRA_INPUT_NAME = "inputName"
+        private const val EXTRA_INPUT_SIZE_BYTES = "inputSizeBytes"
         private const val EXTRA_INPUT_URIS = "inputUris"
         private const val EXTRA_INPUT_NAMES = "inputNames"
+        private const val EXTRA_SESSION_PATH = "sessionPath"
         private const val EXTRA_LOCAL_INPUT = "localInput"
         private const val EXTRA_OUTPUT_URI = "outputUri"
         private const val EXTRA_OUTPUT_NAME = "outputName"
         private const val EXTRA_START_MS = "startMs"
         private const val EXTRA_END_MS = "endMs"
+
+        fun startPrepareCut(context: Context, source: PickedVideo) {
+            val intent = Intent(context, ClipForgeProcessingService::class.java)
+                .setAction(ACTION_PREPARE_CUT)
+                .putSource(source)
+            context.startForegroundService(intent)
+        }
 
         fun startConcat(
             context: Context,
@@ -217,7 +306,9 @@ class ClipForgeProcessingService : Service() {
 
         fun startCut(
             context: Context,
-            localInputPath: String,
+            source: PickedVideo,
+            sessionPath: String,
+            localInputPath: String?,
             outputUri: String,
             outputName: String,
             startMs: Long,
@@ -225,12 +316,19 @@ class ClipForgeProcessingService : Service() {
         ) {
             val intent = Intent(context, ClipForgeProcessingService::class.java)
                 .setAction(ACTION_CUT)
-                .putExtra(EXTRA_LOCAL_INPUT, localInputPath)
+                .putSource(source)
+                .putExtra(EXTRA_SESSION_PATH, sessionPath)
                 .putExtra(EXTRA_OUTPUT_URI, outputUri)
                 .putExtra(EXTRA_OUTPUT_NAME, outputName)
                 .putExtra(EXTRA_START_MS, startMs)
                 .putExtra(EXTRA_END_MS, endMs)
+            localInputPath?.let { intent.putExtra(EXTRA_LOCAL_INPUT, it) }
             context.startForegroundService(intent)
         }
+
+        private fun Intent.putSource(source: PickedVideo): Intent =
+            putExtra(EXTRA_INPUT_URI, source.uri)
+                .putExtra(EXTRA_INPUT_NAME, source.displayName)
+                .putExtra(EXTRA_INPUT_SIZE_BYTES, source.sizeBytes ?: -1L)
     }
 }

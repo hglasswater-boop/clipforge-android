@@ -6,13 +6,13 @@ import android.provider.OpenableColumns
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import app.clipforge.media.FfmpegMediaEngine
-import app.clipforge.media.TrimRangeSnapper
 import app.clipforge.processing.ClipForgeProcessingService
 import app.clipforge.processing.ProcessingState
 import app.clipforge.processing.ProcessingStateStore
 import app.clipforge.workflow.ExternalEditPipeline
 import app.clipforge.workflow.PickedVideo
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
@@ -40,11 +40,11 @@ private fun suggestedCutName(fileName: String): String {
 data class TrimEditorState(
     val sourceUri: String,
     val sourceName: String,
-    val localPath: String,
+    val sessionPath: String,
+    val localPath: String?,
     val durationMs: Long,
     val startMs: Long,
     val endMs: Long,
-    val keyframesMs: List<Long>,
     val thumbnailPaths: List<String>,
 )
 
@@ -65,6 +65,7 @@ data class PendingDestinationRequest(
 
 data class MainUiState(
     val busy: Boolean = false,
+    val progressPercent: Int? = null,
     val selectedVideos: List<PickedVideo> = emptyList(),
     val trimEditor: TrimEditorState? = null,
     val pendingOutput: PendingOutput? = null,
@@ -84,6 +85,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     )
     private val _uiState = MutableStateFlow(MainUiState())
     val uiState = _uiState.asStateFlow()
+    private var thumbnailJob: Job? = null
+    private var thumbnailJobSessionPath: String? = null
 
     init {
         viewModelScope.launch {
@@ -91,13 +94,55 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 when (processing) {
                     ProcessingState.Idle -> Unit
                     is ProcessingState.Running -> _uiState.update {
-                        it.copy(busy = true, status = processing.message, error = null)
+                        it.copy(
+                            busy = true,
+                            progressPercent = processing.progressPercent,
+                            status = processing.message,
+                            error = null,
+                        )
+                    }
+                    is ProcessingState.CutPrepared -> _uiState.update { state ->
+                        val preparedSource = PickedVideo(
+                            uri = processing.sourceUri,
+                            displayName = processing.sourceName,
+                            sizeBytes = state.selectedVideos
+                                .firstOrNull { it.uri == processing.sourceUri }
+                                ?.sizeBytes,
+                        )
+                        state.copy(
+                            busy = false,
+                            progressPercent = null,
+                            selectedVideos = state.selectedVideos.ifEmpty { listOf(preparedSource) },
+                            trimEditor = TrimEditorState(
+                                sourceUri = processing.sourceUri,
+                                sourceName = processing.sourceName,
+                                sessionPath = processing.sessionPath,
+                                localPath = processing.localPath,
+                                durationMs = processing.durationMs,
+                                startMs = 0L,
+                                endMs = processing.durationMs,
+                                thumbnailPaths = processing.thumbnailPaths,
+                            ),
+                            pendingDestination = null,
+                            status = "範囲を選択してください",
+                            error = null,
+                        )
                     }
                     is ProcessingState.Success -> _uiState.update {
-                        it.copy(busy = false, status = processing.message, error = null)
+                        it.copy(
+                            busy = false,
+                            progressPercent = null,
+                            status = processing.message,
+                            error = null,
+                        )
                     }
                     is ProcessingState.Failure -> _uiState.update {
-                        it.copy(busy = false, status = "失敗", error = processing.message)
+                        it.copy(
+                            busy = false,
+                            progressPercent = null,
+                            status = "失敗",
+                            error = processing.message,
+                        )
                     }
                 }
             }
@@ -109,7 +154,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val unique = uriStrings.filter { it.isNotBlank() }.distinct()
         if (unique.isEmpty()) return
         viewModelScope.launch {
-            _uiState.update { it.copy(busy = true, status = "選択した動画を確認中", error = null) }
+            _uiState.update {
+                it.copy(
+                    busy = true,
+                    progressPercent = null,
+                    status = "選択した動画を確認中",
+                    error = null,
+                )
+            }
             try {
                 val videos = withContext(Dispatchers.IO) {
                     unique.mapNotNull(::describeVideo)
@@ -117,6 +169,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 if (videos.isEmpty()) {
                     throw IllegalArgumentException("MP4 / MKV の動画を選択してください")
                 }
+                val oldSession = _uiState.value.trimEditor?.sessionPath
+                cancelThumbnailLoading()
                 _uiState.update {
                     it.copy(
                         selectedVideos = videos,
@@ -127,12 +181,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         error = if (videos.size != unique.size) "MP4 / MKV 以外のファイルは除外しました" else null,
                     )
                 }
+                ProcessingStateStore.idle()
+                if (oldSession != null) {
+                    withContext(Dispatchers.IO) { pipeline.discardPreparedSession(oldSession) }
+                }
             } catch (error: Throwable) {
                 _uiState.update {
                     it.copy(error = error.message ?: error.javaClass.simpleName, status = "選択に失敗しました")
                 }
             } finally {
-                _uiState.update { it.copy(busy = false) }
+                _uiState.update { it.copy(busy = false, progressPercent = null) }
             }
         }
     }
@@ -234,8 +292,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 PendingDestinationKind.CUT -> {
                     val editor = requireNotNull(state.trimEditor) { "カット編集情報がありません" }
+                    val source = sourceFor(editor, state)
                     ClipForgeProcessingService.startCut(
                         context = app,
+                        source = source,
+                        sessionPath = editor.sessionPath,
                         localInputPath = editor.localPath,
                         outputUri = outputUri,
                         outputName = pending.outputName,
@@ -247,9 +308,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         started.fold(
             onSuccess = {
+                if (pending.kind == PendingDestinationKind.CUT) cancelThumbnailLoading()
                 _uiState.update {
                     it.copy(
                         busy = true,
+                        progressPercent = null,
                         trimEditor = if (pending.kind == PendingDestinationKind.CUT) null else it.trimEditor,
                         pendingDestination = null,
                         status = "バックグラウンド処理を開始しました",
@@ -280,24 +343,56 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             showError("カットする動画を1本だけ選択してください")
             return
         }
+        if (_uiState.value.busy) return
+        val app = getApplication<Application>()
         val source = selected.single()
-        runTask("編集画面を準備中") {
-            val prepared = pipeline.prepareCut(source) { message ->
-                _uiState.update { it.copy(status = message) }
+        cancelThumbnailLoading()
+        ProcessingStateStore.idle()
+        _uiState.update {
+            it.copy(
+                busy = true,
+                progressPercent = 0,
+                status = "編集画面を準備中",
+                error = null,
+            )
+        }
+        runCatching { ClipForgeProcessingService.startPrepareCut(app, source) }
+            .onFailure { error ->
+                _uiState.update {
+                    it.copy(
+                        busy = false,
+                        progressPercent = null,
+                        status = "編集画面を準備できませんでした",
+                        error = error.message ?: error.javaClass.simpleName,
+                    )
+                }
             }
-            _uiState.update {
-                it.copy(
-                    trimEditor = TrimEditorState(
-                        sourceUri = prepared.source.uri,
-                        sourceName = prepared.source.displayName,
-                        localPath = prepared.localFile.absolutePath,
-                        durationMs = prepared.durationMs,
-                        startMs = 0L,
-                        endMs = prepared.durationMs,
-                        keyframesMs = prepared.keyframesMs,
-                        thumbnailPaths = prepared.thumbnailPaths,
-                    ),
-                    status = "範囲を選択してください",
+    }
+
+    fun loadTrimThumbnails() {
+        val editor = _uiState.value.trimEditor ?: return
+        if (editor.thumbnailPaths.isNotEmpty()) return
+        if (thumbnailJob?.isActive == true && thumbnailJobSessionPath == editor.sessionPath) return
+
+        cancelThumbnailLoading()
+        thumbnailJobSessionPath = editor.sessionPath
+        val state = _uiState.value
+        val source = sourceFor(editor, state)
+        thumbnailJob = viewModelScope.launch {
+            val paths = runCatching {
+                pipeline.generateCutThumbnails(
+                    source = source,
+                    sessionPath = editor.sessionPath,
+                    localInputPath = editor.localPath,
+                    durationMs = editor.durationMs,
+                )
+            }.getOrNull() ?: return@launch
+
+            _uiState.update { currentState ->
+                val currentEditor = currentState.trimEditor ?: return@update currentState
+                if (currentEditor.sessionPath != editor.sessionPath) return@update currentState
+                currentState.copy(
+                    trimEditor = currentEditor.copy(thumbnailPaths = paths),
                 )
             }
         }
@@ -305,15 +400,46 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun updateTrimRange(requestedStartMs: Long, requestedEndMs: Long): TrimEditorState? {
         val editor = _uiState.value.trimEditor ?: return null
-        val snapped = TrimRangeSnapper.snap(
-            durationMs = editor.durationMs,
-            keyframesMs = editor.keyframesMs,
-            requestedStartMs = requestedStartMs,
-            requestedEndMs = requestedEndMs,
-        )
-        val updated = editor.copy(startMs = snapped.startMs, endMs = snapped.endMs)
+        val duration = editor.durationMs.coerceAtLeast(1L)
+        val start = requestedStartMs.coerceIn(0L, duration - 1L)
+        val end = requestedEndMs.coerceIn(start + 1L, duration)
+        val updated = editor.copy(startMs = start, endMs = end)
         _uiState.update { it.copy(trimEditor = updated, error = null) }
         return updated
+    }
+
+    fun snapTrimRangeToKeyframes() {
+        val editor = _uiState.value.trimEditor ?: return
+        val requestedStart = editor.startMs
+        val requestedEnd = editor.endMs
+        val source = sourceFor(editor, _uiState.value)
+        viewModelScope.launch {
+            runCatching {
+                pipeline.snapCutRange(
+                    source = source,
+                    localInputPath = editor.localPath,
+                    durationMs = editor.durationMs,
+                    requestedStartMs = requestedStart,
+                    requestedEndMs = requestedEnd,
+                )
+            }.onSuccess { snapped ->
+                _uiState.update { state ->
+                    val current = state.trimEditor ?: return@update state
+                    if (
+                        current.sourceUri != editor.sourceUri ||
+                        current.sessionPath != editor.sessionPath ||
+                        current.startMs != requestedStart ||
+                        current.endMs != requestedEnd
+                    ) {
+                        return@update state
+                    }
+                    state.copy(
+                        trimEditor = current.copy(startMs = snapped.first, endMs = snapped.last),
+                        error = null,
+                    )
+                }
+            }
+        }
     }
 
     fun applyTrim(outputName: String) {
@@ -323,8 +449,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun cancelTrimEditor() {
         if (_uiState.value.busy) return
         val editor = _uiState.value.trimEditor ?: return
-        _uiState.update { it.copy(trimEditor = null, status = "編集をキャンセルしました", error = null) }
-        viewModelScope.launch(Dispatchers.IO) { pipeline.discardPrepared(editor.localPath) }
+        cancelThumbnailLoading()
+        _uiState.update {
+            it.copy(
+                trimEditor = null,
+                progressPercent = null,
+                status = "編集をキャンセルしました",
+                error = null,
+            )
+        }
+        ProcessingStateStore.idle()
+        viewModelScope.launch(Dispatchers.IO) { pipeline.discardPreparedSession(editor.sessionPath) }
     }
 
     fun outputHandedOff() {
@@ -333,6 +468,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun outputHandoffFailed(message: String) {
         _uiState.update { it.copy(pendingOutput = null, status = "出力の受け渡しに失敗しました", error = message) }
+    }
+
+    private fun sourceFor(editor: TrimEditorState, state: MainUiState): PickedVideo =
+        PickedVideo(
+            uri = editor.sourceUri,
+            displayName = editor.sourceName,
+            sizeBytes = state.selectedVideos.firstOrNull { it.uri == editor.sourceUri }?.sizeBytes,
+        )
+
+    private fun cancelThumbnailLoading() {
+        thumbnailJob?.cancel()
+        thumbnailJob = null
+        thumbnailJobSessionPath = null
     }
 
     private fun describeVideo(uriString: String): PickedVideo? {
@@ -390,19 +538,5 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun showError(message: String) {
         _uiState.update { it.copy(error = message) }
-    }
-
-    private fun runTask(initialStatus: String, block: suspend () -> Unit) {
-        if (_uiState.value.busy) return
-        viewModelScope.launch {
-            _uiState.update { it.copy(busy = true, status = initialStatus, error = null) }
-            try {
-                block()
-            } catch (error: Throwable) {
-                _uiState.update { it.copy(error = error.message ?: error.javaClass.simpleName, status = "失敗") }
-            } finally {
-                _uiState.update { it.copy(busy = false) }
-            }
-        }
     }
 }
