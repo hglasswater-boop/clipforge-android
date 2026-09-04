@@ -278,6 +278,41 @@ class FfmpegMediaEngine {
         runFfmpeg(args)
     }
 
+    /**
+     * Lossless cut from one already-open seekable descriptor to another. This is the fast path for
+     * XFiles SMB input: no multi-gigabyte staging copy is required before editing or export.
+     */
+    suspend fun cutLosslessDescriptors(
+        inputFd: Int,
+        outputFd: Int,
+        outputName: String,
+        startMs: Long,
+        endMs: Long?,
+    ) = withContext(Dispatchers.IO) {
+        require(startMs >= 0) { "startMs must be >= 0" }
+        require(endMs == null || endMs > startMs) { "endMs must be greater than startMs" }
+
+        val args = mutableListOf(
+            "-hide_banner", "-y",
+            "-noaccurate_seek",
+            "-ss", seconds(startMs),
+            "-fd", inputFd.toString(),
+            "-i", "fd:",
+        )
+        endMs?.let { end ->
+            args += listOf("-t", seconds(end - startMs))
+        }
+        args += listOf(
+            "-map", "0",
+            "-c", "copy",
+            "-avoid_negative_ts", "make_zero",
+            "-f", muxerFor(outputName),
+            "-fd", outputFd.toString(),
+            "fd:",
+        )
+        runFfmpeg(args)
+    }
+
     suspend fun concatLossless(inputs: List<File>, output: File): File = withContext(Dispatchers.IO) {
         require(inputs.size >= 2) { "At least two files are required" }
         output.parentFile?.mkdirs()
