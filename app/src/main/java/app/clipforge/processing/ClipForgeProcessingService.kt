@@ -36,6 +36,7 @@ class ClipForgeProcessingService : Service() {
         if (processingJob?.isActive == true) return START_NOT_STICKY
 
         val title = when (request.action) {
+            ACTION_PREPARE_CUT -> "カット編集を準備中"
             ACTION_CONCAT -> "動画を結合中"
             ACTION_CUT -> "動画をカット中"
             else -> return START_NOT_STICKY
@@ -52,6 +53,26 @@ class ClipForgeProcessingService : Service() {
             )
             try {
                 when (request.action) {
+                    ACTION_PREPARE_CUT -> {
+                        val sourceUri = requireNotNull(request.getStringExtra(EXTRA_INPUT_URI))
+                        val sourceName = requireNotNull(request.getStringExtra(EXTRA_INPUT_NAME))
+                        val sourceSize = request.getLongExtra(EXTRA_INPUT_SIZE_BYTES, -1L).takeIf { it >= 0L }
+                        val source = PickedVideo(
+                            uri = sourceUri,
+                            displayName = sourceName,
+                            sizeBytes = sourceSize,
+                        )
+                        val prepared = pipeline.prepareCut(source) { message -> updateProgress(title, message) }
+                        ProcessingStateStore.cutPrepared(
+                            sourceUri = prepared.source.uri,
+                            sourceName = prepared.source.displayName,
+                            localPath = prepared.localFile.absolutePath,
+                            durationMs = prepared.durationMs,
+                            keyframesMs = prepared.keyframesMs,
+                            thumbnailPaths = prepared.thumbnailPaths,
+                        )
+                        finishPrepared("カット編集の準備が完了しました")
+                    }
                     ACTION_CONCAT -> {
                         val uris = request.getStringArrayListExtra(EXTRA_INPUT_URIS).orEmpty()
                         val names = request.getStringArrayListExtra(EXTRA_INPUT_NAMES).orEmpty()
@@ -66,6 +87,7 @@ class ClipForgeProcessingService : Service() {
                             outputUri = outputUri,
                             outputName = outputName,
                         ) { message -> updateProgress(title, message) }
+                        finishSuccess("処理が完了しました")
                     }
                     ACTION_CUT -> {
                         val localInput = requireNotNull(request.getStringExtra(EXTRA_LOCAL_INPUT))
@@ -81,9 +103,9 @@ class ClipForgeProcessingService : Service() {
                             startMs = startMs,
                             endMs = endMs,
                         ) { message -> updateProgress(title, message) }
+                        finishSuccess("処理が完了しました")
                     }
                 }
-                finishSuccess("処理が完了しました")
             } catch (error: Throwable) {
                 val detail = error.message?.takeIf { it.isNotBlank() } ?: error.javaClass.simpleName
                 finishFailure("処理に失敗しました: $detail")
@@ -109,6 +131,12 @@ class ClipForgeProcessingService : Service() {
         ProcessingStateStore.running(title, message)
         getSystemService(NotificationManager::class.java)
             .notify(NOTIFICATION_ID, buildNotification(title, message, true))
+    }
+
+    private fun finishPrepared(message: String) {
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        getSystemService(NotificationManager::class.java)
+            .notify(NOTIFICATION_ID, buildNotification("ClipForge", message, false))
     }
 
     private fun finishSuccess(message: String) {
@@ -190,8 +218,12 @@ class ClipForgeProcessingService : Service() {
     companion object {
         private const val CHANNEL_ID = "clipforge_processing"
         private const val NOTIFICATION_ID = 4101
+        private const val ACTION_PREPARE_CUT = "app.clipforge.action.PREPARE_CUT"
         private const val ACTION_CONCAT = "app.clipforge.action.CONCAT"
         private const val ACTION_CUT = "app.clipforge.action.CUT"
+        private const val EXTRA_INPUT_URI = "inputUri"
+        private const val EXTRA_INPUT_NAME = "inputName"
+        private const val EXTRA_INPUT_SIZE_BYTES = "inputSizeBytes"
         private const val EXTRA_INPUT_URIS = "inputUris"
         private const val EXTRA_INPUT_NAMES = "inputNames"
         private const val EXTRA_LOCAL_INPUT = "localInput"
@@ -199,6 +231,15 @@ class ClipForgeProcessingService : Service() {
         private const val EXTRA_OUTPUT_NAME = "outputName"
         private const val EXTRA_START_MS = "startMs"
         private const val EXTRA_END_MS = "endMs"
+
+        fun startPrepareCut(context: Context, source: PickedVideo) {
+            val intent = Intent(context, ClipForgeProcessingService::class.java)
+                .setAction(ACTION_PREPARE_CUT)
+                .putExtra(EXTRA_INPUT_URI, source.uri)
+                .putExtra(EXTRA_INPUT_NAME, source.displayName)
+                .putExtra(EXTRA_INPUT_SIZE_BYTES, source.sizeBytes ?: -1L)
+            context.startForegroundService(intent)
+        }
 
         fun startConcat(
             context: Context,
