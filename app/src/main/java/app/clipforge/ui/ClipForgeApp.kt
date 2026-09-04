@@ -215,14 +215,17 @@ private fun HomeScreen(
 @Composable
 private fun TrimEditorScreen(viewModel: MainViewModel, state: MainUiState, editor: TrimEditorState) {
     val context = LocalContext.current
-    val player = remember(editor.localPath) {
+    val player = remember(editor.sourceUri, editor.localPath) {
+        val mediaUri = editor.localPath
+            ?.let { Uri.fromFile(File(it)) }
+            ?: Uri.parse(editor.sourceUri)
         ExoPlayer.Builder(context).build().apply {
-            setMediaItem(MediaItem.fromUri(Uri.fromFile(File(editor.localPath))))
+            setMediaItem(MediaItem.fromUri(mediaUri))
             prepare()
         }
     }
     var outputName by remember(editor.sourceUri) { mutableStateOf("") }
-    var previewSelection by remember(editor.localPath) { mutableStateOf(false) }
+    var previewSelection by remember(editor.sessionPath) { mutableStateOf(false) }
 
     DisposableEffect(player) {
         onDispose { player.release() }
@@ -315,11 +318,7 @@ private fun TrimEditorScreen(viewModel: MainViewModel, state: MainUiState, edito
             }
             item {
                 Text(
-                    if (editor.keyframesMs.isNotEmpty()) {
-                        "IN/OUTハンドルは実際に切断可能なキーフレームへスナップします。表示位置と出力結果が食い違わないようにしています。"
-                    } else {
-                        "キーフレーム一覧を取得できなかったため、範囲指定は時刻ベースです。無劣化カットでは切断位置が前後する場合があります。"
-                    },
+                    "ハンドルを離した位置だけキーフレームを確認します。動画全体のキーフレーム解析は行わないため、大容量ファイルでも編集開始を待たせません。",
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
@@ -515,6 +514,7 @@ private fun TrimRangeControls(viewModel: MainViewModel, player: ExoPlayer, edito
                     player.seekTo(if (startMoved) updated.startMs else updated.endMs)
                 }
             },
+            onValueChangeFinished = viewModel::snapTrimRangeToKeyframes,
             valueRange = 0f..1f,
         )
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -552,7 +552,18 @@ private fun TimelineThumbnailStrip(paths: List<String>) {
 @Composable
 private fun StatusArea(state: MainUiState) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+        if (state.busy) {
+            val percent = state.progressPercent
+            if (percent != null) {
+                LinearProgressIndicator(
+                    progress = { percent / 100f },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Text("$percent%", style = MaterialTheme.typography.bodySmall)
+            } else {
+                LinearProgressIndicator(Modifier.fillMaxWidth())
+            }
+        }
         Text(state.status, style = MaterialTheme.typography.bodyMedium)
         state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
         Spacer(Modifier.height(24.dp))
