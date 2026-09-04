@@ -12,6 +12,7 @@ import app.clipforge.media.NamedMediaDescriptor
 import app.clipforge.media.NamedMediaSignature
 import app.clipforge.media.SyncFrameResolver
 import app.clipforge.media.TimelineThumbnailGenerator
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -159,9 +160,9 @@ class ExternalEditPipeline(
     }
 
     /**
-     * Prepares a trim session. Seekable providers, including XFiles SMB, stay remote and are read
-     * only at the offsets needed for metadata and thumbnails. Non-seekable providers fall back to
-     * a local staging copy with byte/percent/speed progress.
+     * Prepares the minimum state required to open the trim editor. Seekable providers, including
+     * XFiles SMB, only need a metadata probe here. Timeline thumbnails are intentionally deferred
+     * until after the editor is visible, so remote thumbnail seeks never block entry to the editor.
      */
     suspend fun prepareCut(
         source: PickedVideo,
@@ -170,41 +171,34 @@ class ExternalEditPipeline(
         val sessionDir = createEditWorkDir()
         try {
             val direct = runCatching {
-                onProgress("動画を直接開いています", 8)
+                onProgress("動画を直接開いています", 10)
                 openReadDescriptor(source).use { descriptor ->
-                    onProgress("動画情報を解析中", 20)
+                    onProgress("動画情報を解析中", 45)
                     val signature = mediaEngine.probeDescriptor(descriptor.fd, source.displayName)
                     val durationMs = signature.durationMs
                         ?: throw IllegalStateException("動画の長さを取得できませんでした")
-                    onProgress("タイムラインを作成中", 38)
-                    val thumbnails = thumbnailGenerator.generate(
-                        sourceFd = descriptor.fileDescriptor,
-                        outputDir = File(sessionDir, "timeline"),
-                        durationMs = durationMs,
-                    ) { completed, total ->
-                        val percent = 38 + ((completed * 57) / total.coerceAtLeast(1))
-                        onProgress("タイムラインを作成中 $completed/$total", percent)
-                    }.map { it.absolutePath }
                     PreparedExternalCutSession(
                         source = source,
                         sessionDir = sessionDir,
                         localFile = null,
                         durationMs = durationMs,
-                        thumbnailPaths = thumbnails,
+                        thumbnailPaths = emptyList(),
                     )
                 }
+            }
+            direct.exceptionOrNull()?.let { error ->
+                if (error is CancellationException) throw error
             }
             if (direct.isSuccess) {
                 onProgress("編集画面を開いています", 100)
                 return@withContext direct.getOrThrow()
             }
 
-            File(sessionDir, "timeline").deleteRecursively()
             ensureStagingCapacity(source)
             val input = File(sessionDir, safeLocalName(source.displayName))
             copyToLocalWithProgress(source, input) { copiedBytes, totalBytes, bytesPerSecond ->
                 val percent = totalBytes?.takeIf { it > 0L }
-                    ?.let { total -> ((copiedBytes * 70L) / total).toInt().coerceIn(0, 70) }
+                    ?.let { total -> ((copiedBytes * 88L) / total).toInt().coerceIn(0, 88) }
                 val copied = formatBytes(copiedBytes)
                 val total = totalBytes?.takeIf { it > 0L }?.let(::formatBytes)
                 val speed = formatSpeed(bytesPerSecond)
@@ -217,30 +211,51 @@ class ExternalEditPipeline(
                 onProgress(message, percent)
             }
 
-            onProgress("動画情報を解析中", 76)
+            onProgress("動画情報を解析中", 94)
             val signature = mediaEngine.probe(input)
             val durationMs = signature.durationMs
                 ?: throw IllegalStateException("動画の長さを取得できませんでした")
-            onProgress("タイムラインを作成中", 82)
-            val thumbnails = thumbnailGenerator.generate(
-                source = input,
-                outputDir = File(sessionDir, "timeline"),
-                durationMs = durationMs,
-            ) { completed, total ->
-                val percent = 82 + ((completed * 16) / total.coerceAtLeast(1))
-                onProgress("タイムラインを作成中 $completed/$total", percent)
-            }.map { it.absolutePath }
             onProgress("編集画面を開いています", 100)
             PreparedExternalCutSession(
                 source = source,
                 sessionDir = sessionDir,
                 localFile = input,
                 durationMs = durationMs,
-                thumbnailPaths = thumbnails,
+                thumbnailPaths = emptyList(),
             )
         } catch (error: Throwable) {
             sessionDir.deleteRecursively()
             throw error
+        }
+    }
+
+    /** Generates timeline images after the editor has already opened. */
+    suspend fun generateCutThumbnails(
+        source: PickedVideo,
+        sessionPath: String,
+        localInputPath: String?,
+        durationMs: Long,
+        count: Int = 8,
+    ): List<String> = withContext(Dispatchers.IO) {
+        val sessionDir = validatedSessionDir(sessionPath)
+        val timelineDir = File(sessionDir, "timeline")
+        timelineDir.deleteRecursively()
+        if (localInputPath != null) {
+            thumbnailGenerator.generate(
+                source = validatedPreparedFile(localInputPath),
+                outputDir = timelineDir,
+                durationMs = durationMs,
+                count = count,
+            ).map { it.absolutePath }
+        } else {
+            openReadDescriptor(source).use { descriptor ->
+                thumbnailGenerator.generate(
+                    sourceFd = descriptor.fileDescriptor,
+                    outputDir = timelineDir,
+                    durationMs = durationMs,
+                    count = count,
+                ).map { it.absolutePath }
+            }
         }
     }
 
