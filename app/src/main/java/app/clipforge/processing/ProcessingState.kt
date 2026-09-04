@@ -13,6 +13,7 @@ sealed interface ProcessingState {
     data class CutPrepared(
         val sourceUri: String,
         val sourceName: String,
+        val sessionPath: String,
         val localPath: String?,
         val durationMs: Long,
         val thumbnailPaths: List<String>,
@@ -40,6 +41,7 @@ object ProcessingStateStore {
     fun cutPrepared(
         sourceUri: String,
         sourceName: String,
+        sessionPath: String,
         localPath: String?,
         durationMs: Long,
         thumbnailPaths: List<String>,
@@ -47,6 +49,7 @@ object ProcessingStateStore {
         _state.value = ProcessingState.CutPrepared(
             sourceUri = sourceUri,
             sourceName = sourceName,
+            sessionPath = sessionPath,
             localPath = localPath,
             durationMs = durationMs,
             thumbnailPaths = thumbnailPaths,
