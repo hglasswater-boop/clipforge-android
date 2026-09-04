@@ -12,6 +12,7 @@ import app.clipforge.processing.ProcessingStateStore
 import app.clipforge.workflow.ExternalEditPipeline
 import app.clipforge.workflow.PickedVideo
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
@@ -84,6 +85,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     )
     private val _uiState = MutableStateFlow(MainUiState())
     val uiState = _uiState.asStateFlow()
+    private var thumbnailJob: Job? = null
+    private var thumbnailJobSessionPath: String? = null
 
     init {
         viewModelScope.launch {
@@ -167,6 +170,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     throw IllegalArgumentException("MP4 / MKV の動画を選択してください")
                 }
                 val oldSession = _uiState.value.trimEditor?.sessionPath
+                cancelThumbnailLoading()
                 _uiState.update {
                     it.copy(
                         selectedVideos = videos,
@@ -178,7 +182,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
                 ProcessingStateStore.idle()
-                oldSession?.let { pipeline.discardPreparedSession(it) }
+                if (oldSession != null) {
+                    withContext(Dispatchers.IO) { pipeline.discardPreparedSession(oldSession) }
+                }
             } catch (error: Throwable) {
                 _uiState.update {
                     it.copy(error = error.message ?: error.javaClass.simpleName, status = "選択に失敗しました")
@@ -286,11 +292,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 PendingDestinationKind.CUT -> {
                     val editor = requireNotNull(state.trimEditor) { "カット編集情報がありません" }
-                    val source = PickedVideo(
-                        uri = editor.sourceUri,
-                        displayName = editor.sourceName,
-                        sizeBytes = state.selectedVideos.firstOrNull { it.uri == editor.sourceUri }?.sizeBytes,
-                    )
+                    val source = sourceFor(editor, state)
                     ClipForgeProcessingService.startCut(
                         context = app,
                         source = source,
@@ -306,6 +308,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         started.fold(
             onSuccess = {
+                if (pending.kind == PendingDestinationKind.CUT) cancelThumbnailLoading()
                 _uiState.update {
                     it.copy(
                         busy = true,
@@ -343,6 +346,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (_uiState.value.busy) return
         val app = getApplication<Application>()
         val source = selected.single()
+        cancelThumbnailLoading()
         ProcessingStateStore.idle()
         _uiState.update {
             it.copy(
@@ -365,6 +369,35 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
     }
 
+    fun loadTrimThumbnails() {
+        val editor = _uiState.value.trimEditor ?: return
+        if (editor.thumbnailPaths.isNotEmpty()) return
+        if (thumbnailJob?.isActive == true && thumbnailJobSessionPath == editor.sessionPath) return
+
+        cancelThumbnailLoading()
+        thumbnailJobSessionPath = editor.sessionPath
+        val state = _uiState.value
+        val source = sourceFor(editor, state)
+        thumbnailJob = viewModelScope.launch {
+            val paths = runCatching {
+                pipeline.generateCutThumbnails(
+                    source = source,
+                    sessionPath = editor.sessionPath,
+                    localInputPath = editor.localPath,
+                    durationMs = editor.durationMs,
+                )
+            }.getOrNull() ?: return@launch
+
+            _uiState.update { currentState ->
+                val currentEditor = currentState.trimEditor ?: return@update currentState
+                if (currentEditor.sessionPath != editor.sessionPath) return@update currentState
+                currentState.copy(
+                    trimEditor = currentEditor.copy(thumbnailPaths = paths),
+                )
+            }
+        }
+    }
+
     fun updateTrimRange(requestedStartMs: Long, requestedEndMs: Long): TrimEditorState? {
         val editor = _uiState.value.trimEditor ?: return null
         val duration = editor.durationMs.coerceAtLeast(1L)
@@ -379,11 +412,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val editor = _uiState.value.trimEditor ?: return
         val requestedStart = editor.startMs
         val requestedEnd = editor.endMs
-        val source = PickedVideo(
-            uri = editor.sourceUri,
-            displayName = editor.sourceName,
-            sizeBytes = _uiState.value.selectedVideos.firstOrNull { it.uri == editor.sourceUri }?.sizeBytes,
-        )
+        val source = sourceFor(editor, _uiState.value)
         viewModelScope.launch {
             runCatching {
                 pipeline.snapCutRange(
@@ -420,6 +449,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun cancelTrimEditor() {
         if (_uiState.value.busy) return
         val editor = _uiState.value.trimEditor ?: return
+        cancelThumbnailLoading()
         _uiState.update {
             it.copy(
                 trimEditor = null,
@@ -438,6 +468,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun outputHandoffFailed(message: String) {
         _uiState.update { it.copy(pendingOutput = null, status = "出力の受け渡しに失敗しました", error = message) }
+    }
+
+    private fun sourceFor(editor: TrimEditorState, state: MainUiState): PickedVideo =
+        PickedVideo(
+            uri = editor.sourceUri,
+            displayName = editor.sourceName,
+            sizeBytes = state.selectedVideos.firstOrNull { it.uri == editor.sourceUri }?.sizeBytes,
+        )
+
+    private fun cancelThumbnailLoading() {
+        thumbnailJob?.cancel()
+        thumbnailJob = null
+        thumbnailJobSessionPath = null
     }
 
     private fun describeVideo(uriString: String): PickedVideo? {
