@@ -227,6 +227,10 @@ private fun TrimEditorScreen(viewModel: MainViewModel, state: MainUiState, edito
     var outputName by remember(editor.sourceUri) { mutableStateOf("") }
     var previewSelection by remember(editor.sessionPath) { mutableStateOf(false) }
 
+    LaunchedEffect(editor.sessionPath) {
+        viewModel.loadTrimThumbnails()
+    }
+
     DisposableEffect(player) {
         onDispose { player.release() }
     }
@@ -318,7 +322,7 @@ private fun TrimEditorScreen(viewModel: MainViewModel, state: MainUiState, edito
             }
             item {
                 Text(
-                    "ハンドルを離した位置だけキーフレームを確認します。動画全体のキーフレーム解析は行わないため、大容量ファイルでも編集開始を待たせません。",
+                    "編集画面を先に開き、タイムライン画像は後から読み込みます。ハンドルを離した位置だけキーフレームを確認するため、大容量ファイル全体を走査しません。",
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
