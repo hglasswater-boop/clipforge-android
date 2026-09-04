@@ -5,13 +5,16 @@ import kotlinx.coroutines.flow.asStateFlow
 
 sealed interface ProcessingState {
     data object Idle : ProcessingState
-    data class Running(val title: String, val message: String) : ProcessingState
+    data class Running(
+        val title: String,
+        val message: String,
+        val progressPercent: Int? = null,
+    ) : ProcessingState
     data class CutPrepared(
         val sourceUri: String,
         val sourceName: String,
-        val localPath: String,
+        val localPath: String?,
         val durationMs: Long,
-        val keyframesMs: List<Long>,
         val thumbnailPaths: List<String>,
     ) : ProcessingState
     data class Success(val message: String) : ProcessingState
@@ -26,16 +29,19 @@ object ProcessingStateStore {
         _state.value = ProcessingState.Idle
     }
 
-    fun running(title: String, message: String) {
-        _state.value = ProcessingState.Running(title, message)
+    fun running(title: String, message: String, progressPercent: Int? = null) {
+        _state.value = ProcessingState.Running(
+            title = title,
+            message = message,
+            progressPercent = progressPercent?.coerceIn(0, 100),
+        )
     }
 
     fun cutPrepared(
         sourceUri: String,
         sourceName: String,
-        localPath: String,
+        localPath: String?,
         durationMs: Long,
-        keyframesMs: List<Long>,
         thumbnailPaths: List<String>,
     ) {
         _state.value = ProcessingState.CutPrepared(
@@ -43,7 +49,6 @@ object ProcessingStateStore {
             sourceName = sourceName,
             localPath = localPath,
             durationMs = durationMs,
-            keyframesMs = keyframesMs,
             thumbnailPaths = thumbnailPaths,
         )
     }
