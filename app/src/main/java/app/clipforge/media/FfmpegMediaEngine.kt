@@ -32,6 +32,81 @@ internal fun fdConcatScript(inputs: List<NamedMediaDescriptor>): String = buildS
     }
 }
 
+private val mp4FamilyFormats = setOf("mov", "mp4", "m4a", "3gp", "3g2", "mj2")
+
+/**
+ * Returns a user-facing reason when two inputs cannot be joined safely with stream copy.
+ *
+ * Do not compare every ffprobe field byte-for-byte here. In particular, codec_tag is a container
+ * detail, and FFmpeg's concat demuxer can auto-insert h264_mp4toannexb for H.264 MP4 streams. That
+ * conversion is specifically intended to keep stream-copy concatenation working across H.264
+ * parameter changes such as a resolution switch without re-encoding the video.
+ */
+internal fun losslessConcatMismatch(
+    expected: MediaSignature,
+    actual: MediaSignature,
+): String? {
+    val expectedStreams = expected.streams
+    val actualStreams = actual.streams
+    if (expectedStreams.size != actualStreams.size) {
+        return "ストリーム数が ${expectedStreams.size} と ${actualStreams.size} で異なります"
+    }
+
+    expectedStreams.indices.forEach { index ->
+        val left = expectedStreams[index]
+        val right = actualStreams[index]
+        val streamNumber = index + 1
+
+        if (left.type != right.type) {
+            return "ストリーム#$streamNumber の種類が ${left.type} と ${right.type} で異なります"
+        }
+        if (left.codec != right.codec) {
+            return "ストリーム#$streamNumber のコーデックが ${left.codec} と ${right.codec} で異なります"
+        }
+        if (left.timeBase != right.timeBase) {
+            return "ストリーム#$streamNumber の time base が ${left.timeBase ?: "不明"} と ${right.timeBase ?: "不明"} で異なります"
+        }
+
+        when (left.type) {
+            "audio" -> {
+                if (left.sampleRate != right.sampleRate) {
+                    return "音声#$streamNumber のサンプルレートが ${left.sampleRate ?: "不明"} と ${right.sampleRate ?: "不明"} で異なります"
+                }
+                if (left.channels != right.channels) {
+                    return "音声#$streamNumber のチャンネル数が ${left.channels ?: "不明"} と ${right.channels ?: "不明"} で異なります"
+                }
+            }
+
+            "video" -> {
+                val dimensionsDiffer = left.width != right.width || left.height != right.height
+                if (dimensionsDiffer && !canAutoConvertH264ResolutionChange(expected, actual, left, right)) {
+                    return "映像#$streamNumber の解像度が ${formatDimensions(left)} と ${formatDimensions(right)} で異なります"
+                }
+            }
+        }
+    }
+
+    return null
+}
+
+private fun canAutoConvertH264ResolutionChange(
+    expected: MediaSignature,
+    actual: MediaSignature,
+    expectedStream: StreamSignature,
+    actualStream: StreamSignature,
+): Boolean =
+    expectedStream.codec == "h264" &&
+        actualStream.codec == "h264" &&
+        expected.formatNames.any(mp4FamilyFormats::contains) &&
+        actual.formatNames.any(mp4FamilyFormats::contains)
+
+private fun formatDimensions(stream: StreamSignature): String =
+    if (stream.width != null && stream.height != null) {
+        "${stream.width}x${stream.height}"
+    } else {
+        "不明"
+    }
+
 class FfmpegMediaEngine {
 
     suspend fun probe(file: File): MediaSignature = probePath(file.absolutePath, file.name)
@@ -229,12 +304,13 @@ class FfmpegMediaEngine {
         inputs: List<NamedMediaSignature>,
     ) {
         require(inputs.size >= 2) { "At least two files are required" }
-        val expected = inputs.first().signature.streams
+        val baseline = inputs.first()
         inputs.drop(1).forEach { input ->
-            if (input.signature.streams != expected) {
+            val mismatch = losslessConcatMismatch(baseline.signature, input.signature)
+            if (mismatch != null) {
                 throw IncompatibleMediaException(
-                    "${input.displayName} has a different stream layout/codec. " +
-                        "ClipForge will not silently re-encode it.",
+                    "${input.displayName} は ${baseline.displayName} と無劣化結合条件が一致しません: $mismatch。" +
+                        "ClipForge は自動で再エンコードしません。",
                 )
             }
         }
@@ -271,6 +347,7 @@ class FfmpegMediaEngine {
                     "-hide_banner", "-y",
                     "-f", "concat",
                     "-safe", "0",
+                    "-auto_convert", "1",
                     "-i", listFile.absolutePath,
                     "-map", "0",
                     "-c", "copy",
@@ -307,6 +384,7 @@ class FfmpegMediaEngine {
                     "-protocol_whitelist", "file,fd,crypto,data",
                     "-f", "concat",
                     "-safe", "0",
+                    "-auto_convert", "1",
                     "-i", listFile.absolutePath,
                     "-map", "0",
                     "-c", "copy",
