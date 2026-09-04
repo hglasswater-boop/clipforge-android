@@ -10,6 +10,7 @@ import app.clipforge.media.FfmpegMediaEngine
 import app.clipforge.media.LosslessCutRequest
 import app.clipforge.media.NamedMediaDescriptor
 import app.clipforge.media.NamedMediaSignature
+import app.clipforge.media.SyncFrameResolver
 import app.clipforge.media.TimelineThumbnailGenerator
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -27,24 +28,23 @@ data class PickedVideo(
 
 data class PreparedExternalCutSession(
     val source: PickedVideo,
-    val localFile: File,
+    val sessionDir: File,
+    val localFile: File?,
     val durationMs: Long,
-    val keyframesMs: List<Long>,
     val thumbnailPaths: List<String>,
 )
 
 /**
- * External-file pipeline. Legacy fallback operations stage content locally. Direct operations keep
- * seekable ParcelFileDescriptors open and hand their numeric descriptors to FFmpeg's fd: protocol.
- * FFmpeg dup()s each descriptor internally, so it never has to reopen /proc/self/fd (blocked by
- * Android SELinux on current devices). XFiles SMB outputs use an explicit commit step, while normal
- * Android document-provider outputs are already final once their descriptor is closed.
+ * External-file pipeline. Seekable content providers are consumed directly through file
+ * descriptors. Local staging is retained only as a compatibility fallback for providers that
+ * cannot expose a seekable descriptor.
  */
 class ExternalEditPipeline(
     private val cacheRoot: File,
     context: Context,
     private val mediaEngine: FfmpegMediaEngine,
     private val thumbnailGenerator: TimelineThumbnailGenerator = TimelineThumbnailGenerator(),
+    private val syncFrameResolver: SyncFrameResolver = SyncFrameResolver(),
 ) {
     private val contentResolver = context.applicationContext.contentResolver
     private val workRoot = File(cacheRoot, "clipforge/external-work")
@@ -88,11 +88,7 @@ class ExternalEditPipeline(
         }
     }
 
-    /**
-     * Direct path: the selected provider owns the transport/storage while FFmpeg consumes seekable
-     * descriptors. No source file is copied to local storage and stream copy (`-c copy`) remains
-     * lossless.
-     */
+    /** Direct seekable-descriptor concat. No source is copied to local storage. */
     suspend fun concatDirect(
         inputs: List<PickedVideo>,
         outputUri: String,
@@ -106,7 +102,7 @@ class ExternalEditPipeline(
         val workDir = createWorkDir()
         try {
             val signatures = inputs.mapIndexed { index, source ->
-                onProgress("SMB入力を確認しています ${index + 1}/${inputs.size}")
+                onProgress("入力を確認しています ${index + 1}/${inputs.size}")
                 openReadDescriptor(source).use { descriptor ->
                     NamedMediaSignature(
                         displayName = source.displayName,
@@ -162,30 +158,115 @@ class ExternalEditPipeline(
         }
     }
 
+    /**
+     * Prepares a trim session. Seekable providers, including XFiles SMB, stay remote and are read
+     * only at the offsets needed for metadata and thumbnails. Non-seekable providers fall back to
+     * a local staging copy with byte/percent/speed progress.
+     */
     suspend fun prepareCut(
         source: PickedVideo,
-        onProgress: (String) -> Unit = {},
+        onProgress: (message: String, progressPercent: Int?) -> Unit = { _, _ -> },
     ): PreparedExternalCutSession = withContext(Dispatchers.IO) {
-        ensureCacheCapacity(listOf(source))
-        val workDir = createEditWorkDir()
+        val sessionDir = createEditWorkDir()
         try {
-            val input = File(workDir, safeLocalName(source.displayName))
-            onProgress("編集用に取得中: ${source.displayName}")
-            copyToLocal(source, input)
-            onProgress("動画情報を解析中")
+            val direct = runCatching {
+                onProgress("動画を直接開いています", 8)
+                openReadDescriptor(source).use { descriptor ->
+                    onProgress("動画情報を解析中", 20)
+                    val signature = mediaEngine.probeDescriptor(descriptor.fd, source.displayName)
+                    val durationMs = signature.durationMs
+                        ?: throw IllegalStateException("動画の長さを取得できませんでした")
+                    onProgress("タイムラインを作成中", 38)
+                    val thumbnails = thumbnailGenerator.generate(
+                        sourceFd = descriptor.fileDescriptor,
+                        outputDir = File(sessionDir, "timeline"),
+                        durationMs = durationMs,
+                    ) { completed, total ->
+                        val percent = 38 + ((completed * 57) / total.coerceAtLeast(1))
+                        onProgress("タイムラインを作成中 $completed/$total", percent)
+                    }.map { it.absolutePath }
+                    PreparedExternalCutSession(
+                        source = source,
+                        sessionDir = sessionDir,
+                        localFile = null,
+                        durationMs = durationMs,
+                        thumbnailPaths = thumbnails,
+                    )
+                }
+            }
+            if (direct.isSuccess) {
+                onProgress("編集画面を開いています", 100)
+                return@withContext direct.getOrThrow()
+            }
+
+            File(sessionDir, "timeline").deleteRecursively()
+            ensureStagingCapacity(source)
+            val input = File(sessionDir, safeLocalName(source.displayName))
+            copyToLocalWithProgress(source, input) { copiedBytes, totalBytes, bytesPerSecond ->
+                val percent = totalBytes?.takeIf { it > 0L }
+                    ?.let { total -> ((copiedBytes * 70L) / total).toInt().coerceIn(0, 70) }
+                val copied = formatBytes(copiedBytes)
+                val total = totalBytes?.takeIf { it > 0L }?.let(::formatBytes)
+                val speed = formatSpeed(bytesPerSecond)
+                val message = buildString {
+                    append("編集用に取得中 ")
+                    append(copied)
+                    if (total != null) append(" / $total")
+                    if (speed != null) append(" · $speed")
+                }
+                onProgress(message, percent)
+            }
+
+            onProgress("動画情報を解析中", 76)
             val signature = mediaEngine.probe(input)
             val durationMs = signature.durationMs
                 ?: throw IllegalStateException("動画の長さを取得できませんでした")
-            onProgress("キーフレームを解析中")
-            val keyframes = mediaEngine.keyframeTimesMs(input)
-            onProgress("タイムラインを作成中")
-            val thumbnails = thumbnailGenerator
-                .generate(input, File(workDir, "timeline"), durationMs)
-                .map { it.absolutePath }
-            PreparedExternalCutSession(source, input, durationMs, keyframes, thumbnails)
+            onProgress("タイムラインを作成中", 82)
+            val thumbnails = thumbnailGenerator.generate(
+                source = input,
+                outputDir = File(sessionDir, "timeline"),
+                durationMs = durationMs,
+            ) { completed, total ->
+                val percent = 82 + ((completed * 16) / total.coerceAtLeast(1))
+                onProgress("タイムラインを作成中 $completed/$total", percent)
+            }.map { it.absolutePath }
+            onProgress("編集画面を開いています", 100)
+            PreparedExternalCutSession(
+                source = source,
+                sessionDir = sessionDir,
+                localFile = input,
+                durationMs = durationMs,
+                thumbnailPaths = thumbnails,
+            )
         } catch (error: Throwable) {
-            workDir.deleteRecursively()
+            sessionDir.deleteRecursively()
             throw error
+        }
+    }
+
+    suspend fun snapCutRange(
+        source: PickedVideo,
+        localInputPath: String?,
+        durationMs: Long,
+        requestedStartMs: Long,
+        requestedEndMs: Long,
+    ): LongRange = withContext(Dispatchers.IO) {
+        if (localInputPath != null) {
+            syncFrameResolver.snapRange(
+                source = validatedPreparedFile(localInputPath),
+                durationMs = durationMs,
+                requestedStartMs = requestedStartMs,
+                requestedEndMs = requestedEndMs,
+            )
+        } else {
+            openReadDescriptor(source).use { descriptor ->
+                syncFrameResolver.snapRange(
+                    sourceFd = descriptor.fileDescriptor,
+                    durationMs = durationMs,
+                    requestedStartMs = requestedStartMs,
+                    requestedEndMs = requestedEndMs,
+                )
+            }
         }
     }
 
@@ -211,9 +292,9 @@ class ExternalEditPipeline(
         }
     }
 
-    /** Writes the already-prepared local trim source straight into the selected output descriptor. */
     suspend fun cutPreparedDirect(
         localInputPath: String,
+        sessionPath: String,
         outputUri: String,
         outputName: String,
         startMs: Long,
@@ -236,36 +317,76 @@ class ExternalEditPipeline(
                     endMs = endMs,
                 )
             }
-        } catch (error: Throwable) {
-            abortOutput(destination)
-            throw error
-        }
-
-        try {
-            if (remoteDestination) {
-                onProgress("SMB保存を確定しています")
-                commitRemoteOutput(destination)
-                onProgress("SMBへ直接保存しました")
-            } else {
-                onProgress("端末へ保存しました")
-            }
-            discardPrepared(localInputPath)
+            finishOutput(destination, remoteDestination, onProgress)
+            discardPreparedSession(sessionPath)
         } catch (error: Throwable) {
             abortOutput(destination)
             throw error
         }
     }
 
-    fun discardPrepared(localInputPath: String) {
-        runCatching {
-            val input = validatedPreparedFile(localInputPath)
-            input.parentFile?.deleteRecursively()
+    suspend fun cutSourceDirect(
+        source: PickedVideo,
+        sessionPath: String,
+        outputUri: String,
+        outputName: String,
+        startMs: Long,
+        endMs: Long,
+        onProgress: (String) -> Unit = {},
+    ) = withContext(Dispatchers.IO) {
+        val destination = Uri.parse(outputUri)
+        val remoteDestination = isXFilesRemoteOutput(destination)
+        val destinationLabel = if (remoteDestination) "SMB" else "端末"
+        var inputDescriptor: ParcelFileDescriptor? = null
+        var outputDescriptor: ParcelFileDescriptor? = null
+        try {
+            onProgress("入力と${destinationLabel}保存先を開いています")
+            inputDescriptor = openReadDescriptor(source)
+            outputDescriptor = openReadWriteDescriptor(destination)
+            onProgress("無劣化でカットしながら${destinationLabel}へ保存中")
+            mediaEngine.cutLosslessDescriptors(
+                inputFd = inputDescriptor.fd,
+                outputFd = outputDescriptor.fd,
+                outputName = outputName,
+                startMs = startMs,
+                endMs = endMs,
+            )
+            runCatching { outputDescriptor.close() }
+            outputDescriptor = null
+            runCatching { inputDescriptor.close() }
+            inputDescriptor = null
+            finishOutput(destination, remoteDestination, onProgress)
+            discardPreparedSession(sessionPath)
+        } catch (error: Throwable) {
+            abortOutput(destination)
+            throw error
+        } finally {
+            runCatching { outputDescriptor?.close() }
+            runCatching { inputDescriptor?.close() }
         }
+    }
+
+    fun discardPreparedSession(sessionPath: String) {
+        runCatching { validatedSessionDir(sessionPath).deleteRecursively() }
     }
 
     fun cleanupPreparedSessions() {
         runCatching { editSessionRoot.deleteRecursively() }
         runCatching { workRoot.deleteRecursively() }
+    }
+
+    private fun finishOutput(
+        destination: Uri,
+        remoteDestination: Boolean,
+        onProgress: (String) -> Unit,
+    ) {
+        if (remoteDestination) {
+            onProgress("SMB保存を確定しています")
+            commitRemoteOutput(destination)
+            onProgress("SMBへ直接保存しました")
+        } else {
+            onProgress("端末へ保存しました")
+        }
     }
 
     private fun commitRemoteOutput(uri: Uri) {
@@ -287,10 +408,10 @@ class ExternalEditPipeline(
         return try {
             val descriptor = contentResolver.openFileDescriptor(uri, "r")
                 ?: throw IOException("ファイル記述子を取得できません")
-            validateSeekableDescriptor(descriptor, "SMB入力 ${source.displayName}")
+            validateSeekableDescriptor(descriptor, "入力 ${source.displayName}")
         } catch (error: Throwable) {
             val detail = error.message?.takeIf { it.isNotBlank() } ?: error.javaClass.simpleName
-            throw IOException("SMB入力を開けません: ${source.displayName} ($detail)", error)
+            throw IOException("入力を直接開けません: ${source.displayName} ($detail)", error)
         }
     }
 
@@ -317,13 +438,45 @@ class ExternalEditPipeline(
     }
 
     private fun copyToLocal(source: PickedVideo, target: File) {
+        copyToLocalWithProgress(source, target) { _, _, _ -> }
+    }
+
+    private fun copyToLocalWithProgress(
+        source: PickedVideo,
+        target: File,
+        onProgress: (copiedBytes: Long, totalBytes: Long?, bytesPerSecond: Double?) -> Unit,
+    ) {
         target.parentFile?.mkdirs()
         val uri = Uri.parse(source.uri)
         try {
             val input = contentResolver.openInputStream(uri)
                 ?: throw IllegalStateException("ファイルを開けません")
+            val totalBytes = source.sizeBytes?.takeIf { it > 0L }
             input.use { from ->
-                target.outputStream().buffered().use { to -> from.copyTo(to) }
+                target.outputStream().buffered(BUFFER_SIZE).use { to ->
+                    val buffer = ByteArray(BUFFER_SIZE)
+                    val startedNs = System.nanoTime()
+                    var lastReportNs = startedNs
+                    var copied = 0L
+                    onProgress(0L, totalBytes, null)
+                    while (true) {
+                        val read = from.read(buffer)
+                        if (read < 0) break
+                        if (read == 0) continue
+                        to.write(buffer, 0, read)
+                        copied += read
+                        val now = System.nanoTime()
+                        if (now - lastReportNs >= PROGRESS_INTERVAL_NS) {
+                            val elapsedSeconds = (now - startedNs) / 1_000_000_000.0
+                            val speed = copied / elapsedSeconds.coerceAtLeast(0.001)
+                            onProgress(copied, totalBytes, speed)
+                            lastReportNs = now
+                        }
+                    }
+                    val elapsedSeconds = (System.nanoTime() - startedNs) / 1_000_000_000.0
+                    val speed = copied / elapsedSeconds.coerceAtLeast(0.001)
+                    onProgress(copied, totalBytes, speed)
+                }
             }
         } catch (error: Throwable) {
             target.delete()
@@ -340,6 +493,25 @@ class ExternalEditPipeline(
         return input
     }
 
+    private fun validatedSessionDir(sessionPath: String): File {
+        val root = editSessionRoot.canonicalFile
+        val session = File(sessionPath).canonicalFile
+        val insideRoot = session.path.startsWith(root.path + File.separator)
+        require(insideRoot && session.isDirectory) { "編集セッションが見つかりません" }
+        return session
+    }
+
+    private fun ensureStagingCapacity(source: PickedVideo) {
+        val inputBytes = source.sizeBytes?.takeIf { it >= 0L } ?: return
+        val requiredBytes = saturatingAdd(inputBytes, STAGING_RESERVE_BYTES)
+        val availableBytes = cacheRoot.usableSpace
+        if (availableBytes < requiredBytes) {
+            throw IllegalStateException(
+                "端末の空き容量が不足しています。必要 約${formatGiB(requiredBytes)}GB / 空き 約${formatGiB(availableBytes)}GB",
+            )
+        }
+    }
+
     private fun ensureCacheCapacity(inputs: List<PickedVideo>) {
         var inputBytes = 0L
         var sizeKnown = true
@@ -353,11 +525,10 @@ class ExternalEditPipeline(
         }
         if (!sizeKnown) return
 
-        val reserveBytes = 256L * 1024L * 1024L
-        val requiredBytes = if (inputBytes > (Long.MAX_VALUE - reserveBytes) / 2L) {
+        val requiredBytes = if (inputBytes > (Long.MAX_VALUE - STAGING_RESERVE_BYTES) / 2L) {
             Long.MAX_VALUE
         } else {
-            inputBytes * 2L + reserveBytes
+            inputBytes * 2L + STAGING_RESERVE_BYTES
         }
         val availableBytes = cacheRoot.usableSpace
         if (availableBytes < requiredBytes) {
@@ -404,9 +575,26 @@ class ExternalEditPipeline(
     private fun formatGiB(bytes: Long): String =
         String.format(Locale.US, "%.1f", bytes / (1024.0 * 1024.0 * 1024.0))
 
+    private fun formatBytes(bytes: Long): String {
+        val gib = bytes / (1024.0 * 1024.0 * 1024.0)
+        return if (gib >= 1.0) {
+            String.format(Locale.US, "%.2f GB", gib)
+        } else {
+            String.format(Locale.US, "%.0f MB", bytes / (1024.0 * 1024.0))
+        }
+    }
+
+    private fun formatSpeed(bytesPerSecond: Double?): String? {
+        val speed = bytesPerSecond?.takeIf { it.isFinite() && it > 0.0 } ?: return null
+        return String.format(Locale.US, "%.1f MB/s", speed / (1024.0 * 1024.0))
+    }
+
     private companion object {
         const val XFILES_REMOTE_PROVIDER_AUTHORITY = "app.local1st.files.remotefileprovider"
         const val REMOTE_COMMIT_KEY = "commit"
         const val RETENTION_MS = 24L * 60L * 60L * 1000L
+        const val BUFFER_SIZE = 1024 * 1024
+        const val PROGRESS_INTERVAL_NS = 250_000_000L
+        const val STAGING_RESERVE_BYTES = 256L * 1024L * 1024L
     }
 }
