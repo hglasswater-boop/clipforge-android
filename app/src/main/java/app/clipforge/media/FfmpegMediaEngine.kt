@@ -28,6 +28,11 @@ data class NamedMediaSignature(
     val signature: MediaSignature,
 )
 
+sealed interface SmartConcatInput {
+    data class SourceSegment(val segment: MediaSegment) : SmartConcatInput
+    data class RenderedFile(val path: String) : SmartConcatInput
+}
+
 internal fun fdConcatScript(inputs: List<NamedMediaDescriptor>): String = buildString {
     appendLine("ffconcat version 1.0")
     inputs.forEach { input ->
@@ -52,6 +57,39 @@ private fun pathSegmentConcatScript(path: String, segments: List<MediaSegment>):
         appendLine("file '${escapeConcatPathValue(path)}'")
         appendLine("inpoint ${concatTimestamp(segment.startMs)}")
         appendLine("outpoint ${concatTimestamp(segment.endMs)}")
+    }
+}
+
+private fun pathSmartConcatScript(path: String, parts: List<SmartConcatInput>): String = buildString {
+    appendLine("ffconcat version 1.0")
+    parts.forEach { part ->
+        when (part) {
+            is SmartConcatInput.SourceSegment -> {
+                appendLine("file '${escapeConcatPathValue(path)}'")
+                appendLine("inpoint ${concatTimestamp(part.segment.startMs)}")
+                appendLine("outpoint ${concatTimestamp(part.segment.endMs)}")
+            }
+            is SmartConcatInput.RenderedFile -> {
+                appendLine("file '${escapeConcatPathValue(part.path)}'")
+            }
+        }
+    }
+}
+
+private fun fdSmartConcatScript(fd: Int, parts: List<SmartConcatInput>): String = buildString {
+    appendLine("ffconcat version 1.0")
+    parts.forEach { part ->
+        when (part) {
+            is SmartConcatInput.SourceSegment -> {
+                appendLine("file 'fd:'")
+                appendLine("option fd $fd")
+                appendLine("inpoint ${concatTimestamp(part.segment.startMs)}")
+                appendLine("outpoint ${concatTimestamp(part.segment.endMs)}")
+            }
+            is SmartConcatInput.RenderedFile -> {
+                appendLine("file '${escapeConcatPathValue(part.path)}'")
+            }
+        }
     }
 }
 
@@ -352,6 +390,180 @@ class FfmpegMediaEngine {
     }
 
     /**
+     * Reencodes only one short GOP fragment around an exact smart-cut boundary. All non-video
+     * streams remain stream-copied. The output is a temporary piece that is later interleaved with
+     * untouched source pieces by the concat demuxer.
+     */
+    suspend fun renderSmartBoundaryToPath(
+        inputPath: String,
+        output: File,
+        sourceSignature: MediaSignature,
+        segment: MediaSegment,
+        onProgressPercent: (Int) -> Unit = {},
+    ) = withContext(Dispatchers.IO) {
+        renderSmartBoundary(
+            inputArguments = listOf("-i", inputPath),
+            output = output,
+            sourceSignature = sourceSignature,
+            segment = segment,
+            onProgressPercent = onProgressPercent,
+        )
+    }
+
+    suspend fun renderSmartBoundaryDescriptor(
+        inputFd: Int,
+        output: File,
+        sourceSignature: MediaSignature,
+        segment: MediaSegment,
+        onProgressPercent: (Int) -> Unit = {},
+    ) = withContext(Dispatchers.IO) {
+        renderSmartBoundary(
+            inputArguments = listOf("-fd", inputFd.toString(), "-i", "fd:"),
+            output = output,
+            sourceSignature = sourceSignature,
+            segment = segment,
+            onProgressPercent = onProgressPercent,
+        )
+    }
+
+    private suspend fun renderSmartBoundary(
+        inputArguments: List<String>,
+        output: File,
+        sourceSignature: MediaSignature,
+        segment: MediaSegment,
+        onProgressPercent: (Int) -> Unit,
+    ) {
+        val videoStreams = sourceSignature.streams.filter { it.type == "video" }
+        require(videoStreams.size == 1) {
+            "正確カットは映像トラックが1本の動画に対応しています。完全無劣化モードを使用してください"
+        }
+        val video = videoStreams.single()
+        val encoder = when (video.codec) {
+            "h264" -> "libopenh264"
+            "hevc", "h265" -> "libkvazaar"
+            else -> throw IncompatibleMediaException(
+                "正確カットは現在 H.264 / H.265 に対応しています（${video.codec}）。完全無劣化モードを使用してください",
+            )
+        }
+        output.parentFile?.mkdirs()
+
+        val args = mutableListOf(
+            "-hide_banner", "-y",
+            "-ss", seconds(segment.startMs),
+        )
+        args += inputArguments
+        args += listOf(
+            "-t", seconds(segment.durationMs),
+            "-map", "0",
+            "-c", "copy",
+            "-c:v:0", encoder,
+            "-b:v:0", smartBoundaryBitrate(video, video.codec).toString(),
+        )
+        if (video.codec == "h264") {
+            args += listOf("-pix_fmt", "yuv420p")
+        }
+        if (output.extension.equals("mp4", ignoreCase = true)) {
+            video.codecTag
+                ?.takeIf { it == "avc1" || it == "hvc1" || it == "hev1" }
+                ?.let { args += listOf("-tag:v:0", it) }
+            videoTimeScale(video.timeBase)?.let { scale ->
+                args += listOf("-video_track_timescale", scale.toString())
+            }
+        }
+        args += listOf(
+            "-avoid_negative_ts", "make_zero",
+            "-f", muxerFor(output.name),
+            output.absolutePath,
+        )
+        runFfmpeg(
+            arguments = args,
+            expectedDurationMs = segment.durationMs,
+            onProgressPercent = onProgressPercent,
+        )
+    }
+
+    suspend fun concatSmartPartsToDescriptor(
+        inputPath: String,
+        outputFd: Int,
+        outputName: String,
+        parts: List<SmartConcatInput>,
+        expectedDurationMs: Long,
+        workingDirectory: File,
+        onProgressPercent: (Int) -> Unit = {},
+    ) = withContext(Dispatchers.IO) {
+        concatSmartParts(
+            script = pathSmartConcatScript(inputPath, parts),
+            usesFdSource = false,
+            outputFd = outputFd,
+            outputName = outputName,
+            expectedDurationMs = expectedDurationMs,
+            workingDirectory = workingDirectory,
+            onProgressPercent = onProgressPercent,
+        )
+    }
+
+    suspend fun concatSmartPartsDescriptors(
+        inputFd: Int,
+        outputFd: Int,
+        outputName: String,
+        parts: List<SmartConcatInput>,
+        expectedDurationMs: Long,
+        workingDirectory: File,
+        onProgressPercent: (Int) -> Unit = {},
+    ) = withContext(Dispatchers.IO) {
+        concatSmartParts(
+            script = fdSmartConcatScript(inputFd, parts),
+            usesFdSource = true,
+            outputFd = outputFd,
+            outputName = outputName,
+            expectedDurationMs = expectedDurationMs,
+            workingDirectory = workingDirectory,
+            onProgressPercent = onProgressPercent,
+        )
+    }
+
+    private suspend fun concatSmartParts(
+        script: String,
+        usesFdSource: Boolean,
+        outputFd: Int,
+        outputName: String,
+        expectedDurationMs: Long,
+        workingDirectory: File,
+        onProgressPercent: (Int) -> Unit,
+    ) {
+        require(script.isNotBlank()) { "smart cut script must not be empty" }
+        workingDirectory.mkdirs()
+        val listFile = File(workingDirectory, ".clipforge-smart-${System.nanoTime()}.ffconcat")
+        try {
+            listFile.writeText(script)
+            val args = mutableListOf("-hide_banner", "-y")
+            if (usesFdSource) {
+                args += listOf("-protocol_whitelist", "file,fd,crypto,data")
+            }
+            args += listOf(
+                "-f", "concat",
+                "-safe", "0",
+                "-auto_convert", "1",
+                "-i", listFile.absolutePath,
+                "-map", "0",
+                "-c", "copy",
+                "-fflags", "+genpts",
+                "-avoid_negative_ts", "make_zero",
+                "-f", muxerFor(outputName),
+                "-fd", outputFd.toString(),
+                "fd:",
+            )
+            runFfmpeg(
+                arguments = args,
+                expectedDurationMs = expectedDurationMs,
+                onProgressPercent = onProgressPercent,
+            )
+        } finally {
+            listFile.delete()
+        }
+    }
+
+    /**
      * Keeps several ranges from one local source and joins them into one output in a single FFmpeg
      * command. Callers must snap range boundaries to sync frames before reaching this method.
      */
@@ -562,7 +774,7 @@ class FfmpegMediaEngine {
             null,
             { statistics ->
                 expectedDurationMs
-                    ?.takeIf { it > 0L }
+                    ?.takeIf { it > 0L && statistics.time.isFinite() }
                     ?.let { durationMs ->
                         val percent = ((statistics.time / durationMs.toDouble()) * 100.0)
                             .roundToInt()
@@ -586,6 +798,25 @@ class FfmpegMediaEngine {
             FFmpegKit.cancel(session.sessionId)
             throw cancelled
         }
+    }
+
+    private fun smartBoundaryBitrate(stream: StreamSignature, codec: String): Long {
+        val width = stream.width ?: 1920
+        val height = stream.height ?: 1080
+        val pixels = width.toLong() * height.toLong()
+        val h264 = when {
+            pixels >= 3_840L * 2_160L -> 30_000_000L
+            pixels >= 1_920L * 1_080L -> 12_000_000L
+            pixels >= 1_280L * 720L -> 6_000_000L
+            else -> 3_000_000L
+        }
+        return if (codec == "h264") h264 else (h264 * 2L / 3L)
+    }
+
+    private fun videoTimeScale(timeBase: String?): Int? {
+        val pieces = timeBase?.split('/') ?: return null
+        if (pieces.size != 2 || pieces[0] != "1") return null
+        return pieces[1].toIntOrNull()?.takeIf { it in 1..1_000_000 }
     }
 
     private fun muxerFor(outputName: String): String = when (

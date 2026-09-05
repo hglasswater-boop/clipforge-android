@@ -1,5 +1,10 @@
 package app.clipforge.media
 
+enum class CutMode {
+    SMART,
+    LOSSLESS,
+}
+
 /** Half-open media range: [startMs, endMs). */
 data class MediaSegment(
     val startMs: Long,

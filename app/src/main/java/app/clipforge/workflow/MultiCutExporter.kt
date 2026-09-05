@@ -6,12 +6,18 @@ import android.net.Uri
 import android.os.ParcelFileDescriptor
 import android.system.Os
 import android.system.OsConstants
+import app.clipforge.media.CutMode
 import app.clipforge.media.FfmpegMediaEngine
 import app.clipforge.media.MediaSegment
+import app.clipforge.media.SmartConcatInput
+import app.clipforge.media.SmartCutPart
+import app.clipforge.media.SyncFrameResolver
+import app.clipforge.media.planSmartCutSegment
 import app.clipforge.media.remainingSegments
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.FileDescriptor
 import java.io.IOException
 import java.util.UUID
 
@@ -19,6 +25,7 @@ class MultiCutExporter(
     private val cacheRoot: File,
     context: Context,
     private val mediaEngine: FfmpegMediaEngine,
+    private val syncFrameResolver: SyncFrameResolver = SyncFrameResolver(),
 ) {
     private val contentResolver = context.applicationContext.contentResolver
 
@@ -28,6 +35,7 @@ class MultiCutExporter(
         sessionPath: String,
         durationMs: Long,
         cutRanges: List<MediaSegment>,
+        cutMode: CutMode,
         outputUri: String,
         outputName: String,
         onProgress: (message: String, progressPercent: Int?) -> Unit = { _, _ -> },
@@ -44,7 +52,7 @@ class MultiCutExporter(
         var outputDescriptor: ParcelFileDescriptor? = null
         var lastWritePercent = -1
 
-        fun reportWriteProgress(percent: Int) {
+        fun reportLosslessWriteProgress(percent: Int) {
             val safe = percent.coerceIn(0, 100)
             if (safe == lastWritePercent) return
             lastWritePercent = safe
@@ -55,6 +63,12 @@ class MultiCutExporter(
             )
         }
 
+        fun reportSmartConcatProgress(percent: Int) {
+            val safe = percent.coerceIn(0, 100)
+            val overall = (58 + (safe * 36 / 100)).coerceIn(58, 94)
+            onProgress("スマートカットを書き出し中 $safe%", overall)
+        }
+
         try {
             onProgress("${destinationLabel}保存先を開いています", 5)
             outputDescriptor = openReadWriteDescriptor(destination)
@@ -63,47 +77,52 @@ class MultiCutExporter(
                 val input = File(localInputPath)
                 require(input.isFile) { "編集用キャッシュが見つかりません" }
                 onProgress("編集データを読み込んでいます", 8)
-                if (keepSegments.size == 1) {
-                    val segment = keepSegments.single()
-                    mediaEngine.cutLosslessToDescriptor(
-                        inputPath = input.absolutePath,
+                if (cutMode == CutMode.SMART) {
+                    exportSmartLocal(
+                        input = input,
+                        source = source,
+                        durationMs = durationMs,
+                        keepSegments = keepSegments,
                         outputFd = outputDescriptor.fd,
                         outputName = outputName,
-                        startMs = segment.startMs,
-                        endMs = segment.endMs,
-                        onProgressPercent = ::reportWriteProgress,
+                        workDir = workDir,
+                        onProgress = onProgress,
+                        onConcatProgress = ::reportSmartConcatProgress,
                     )
                 } else {
-                    mediaEngine.concatSegmentsLosslessToDescriptor(
-                        inputPath = input.absolutePath,
+                    exportLosslessLocal(
+                        input = input,
+                        keepSegments = keepSegments,
                         outputFd = outputDescriptor.fd,
                         outputName = outputName,
-                        segments = keepSegments,
-                        workingDirectory = workDir,
-                        onProgressPercent = ::reportWriteProgress,
+                        workDir = workDir,
+                        onProgress = ::reportLosslessWriteProgress,
                     )
                 }
             } else {
                 onProgress("元動画を直接開いています", 8)
                 inputDescriptor = openReadDescriptor(source)
-                if (keepSegments.size == 1) {
-                    val segment = keepSegments.single()
-                    mediaEngine.cutLosslessDescriptors(
-                        inputFd = inputDescriptor.fd,
+                if (cutMode == CutMode.SMART) {
+                    exportSmartDescriptor(
+                        inputFd = inputDescriptor.fileDescriptor,
+                        inputFdNumber = inputDescriptor.fd,
+                        source = source,
+                        durationMs = durationMs,
+                        keepSegments = keepSegments,
                         outputFd = outputDescriptor.fd,
                         outputName = outputName,
-                        startMs = segment.startMs,
-                        endMs = segment.endMs,
-                        onProgressPercent = ::reportWriteProgress,
+                        workDir = workDir,
+                        onProgress = onProgress,
+                        onConcatProgress = ::reportSmartConcatProgress,
                     )
                 } else {
-                    mediaEngine.concatSegmentsLosslessDescriptors(
+                    exportLosslessDescriptor(
                         inputFd = inputDescriptor.fd,
+                        keepSegments = keepSegments,
                         outputFd = outputDescriptor.fd,
                         outputName = outputName,
-                        segments = keepSegments,
-                        workingDirectory = workDir,
-                        onProgressPercent = ::reportWriteProgress,
+                        workDir = workDir,
+                        onProgress = ::reportLosslessWriteProgress,
                     )
                 }
             }
@@ -131,6 +150,238 @@ class MultiCutExporter(
             workDir.deleteRecursively()
         }
     }
+
+    private suspend fun exportLosslessLocal(
+        input: File,
+        keepSegments: List<MediaSegment>,
+        outputFd: Int,
+        outputName: String,
+        workDir: File,
+        onProgress: (Int) -> Unit,
+    ) {
+        if (keepSegments.size == 1) {
+            val segment = keepSegments.single()
+            mediaEngine.cutLosslessToDescriptor(
+                inputPath = input.absolutePath,
+                outputFd = outputFd,
+                outputName = outputName,
+                startMs = segment.startMs,
+                endMs = segment.endMs,
+                onProgressPercent = onProgress,
+            )
+        } else {
+            mediaEngine.concatSegmentsLosslessToDescriptor(
+                inputPath = input.absolutePath,
+                outputFd = outputFd,
+                outputName = outputName,
+                segments = keepSegments,
+                workingDirectory = workDir,
+                onProgressPercent = onProgress,
+            )
+        }
+    }
+
+    private suspend fun exportLosslessDescriptor(
+        inputFd: Int,
+        keepSegments: List<MediaSegment>,
+        outputFd: Int,
+        outputName: String,
+        workDir: File,
+        onProgress: (Int) -> Unit,
+    ) {
+        if (keepSegments.size == 1) {
+            val segment = keepSegments.single()
+            mediaEngine.cutLosslessDescriptors(
+                inputFd = inputFd,
+                outputFd = outputFd,
+                outputName = outputName,
+                startMs = segment.startMs,
+                endMs = segment.endMs,
+                onProgressPercent = onProgress,
+            )
+        } else {
+            mediaEngine.concatSegmentsLosslessDescriptors(
+                inputFd = inputFd,
+                outputFd = outputFd,
+                outputName = outputName,
+                segments = keepSegments,
+                workingDirectory = workDir,
+                onProgressPercent = onProgress,
+            )
+        }
+    }
+
+    private suspend fun exportSmartLocal(
+        input: File,
+        source: PickedVideo,
+        durationMs: Long,
+        keepSegments: List<MediaSegment>,
+        outputFd: Int,
+        outputName: String,
+        workDir: File,
+        onProgress: (String, Int?) -> Unit,
+        onConcatProgress: (Int) -> Unit,
+    ) {
+        onProgress("スマートカットの境界を確認しています", 10)
+        val signature = mediaEngine.probe(input)
+        val planned = planSmartParts(
+            durationMs = durationMs,
+            keepSegments = keepSegments,
+            before = { position -> syncFrameResolver.syncFrameAtOrBefore(input, durationMs, position) },
+            after = { position -> syncFrameResolver.syncFrameAtOrAfter(input, durationMs, position) },
+        )
+        val reencodeCount = planned.count { it is SmartCutPart.Reencode }
+        if (reencodeCount == 0) {
+            exportLosslessLocal(input, keepSegments, outputFd, outputName, workDir) { percent ->
+                val overall = (12 + percent * 82 / 100).coerceIn(12, 94)
+                onProgress("キーフレーム一致のため無劣化で書き出し中 $percent%", overall)
+            }
+            return
+        }
+
+        val concatParts = renderSmartParts(
+            planned = planned,
+            workDir = workDir,
+            sourceExtension = sourceExtension(source.displayName),
+            render = { segment, file, callback ->
+                mediaEngine.renderSmartBoundaryToPath(
+                    inputPath = input.absolutePath,
+                    output = file,
+                    sourceSignature = signature,
+                    segment = segment,
+                    onProgressPercent = callback,
+                )
+            },
+            onProgress = onProgress,
+        )
+        mediaEngine.concatSmartPartsToDescriptor(
+            inputPath = input.absolutePath,
+            outputFd = outputFd,
+            outputName = outputName,
+            parts = concatParts,
+            expectedDurationMs = keepSegments.sumOf(MediaSegment::durationMs),
+            workingDirectory = workDir,
+            onProgressPercent = onConcatProgress,
+        )
+    }
+
+    private suspend fun exportSmartDescriptor(
+        inputFd: FileDescriptor,
+        inputFdNumber: Int,
+        source: PickedVideo,
+        durationMs: Long,
+        keepSegments: List<MediaSegment>,
+        outputFd: Int,
+        outputName: String,
+        workDir: File,
+        onProgress: (String, Int?) -> Unit,
+        onConcatProgress: (Int) -> Unit,
+    ) {
+        onProgress("スマートカットの境界を確認しています", 10)
+        val signature = mediaEngine.probeDescriptor(inputFdNumber, source.displayName)
+        val planned = planSmartParts(
+            durationMs = durationMs,
+            keepSegments = keepSegments,
+            before = { position -> syncFrameResolver.syncFrameAtOrBefore(inputFd, durationMs, position) },
+            after = { position -> syncFrameResolver.syncFrameAtOrAfter(inputFd, durationMs, position) },
+        )
+        val reencodeCount = planned.count { it is SmartCutPart.Reencode }
+        if (reencodeCount == 0) {
+            exportLosslessDescriptor(inputFdNumber, keepSegments, outputFd, outputName, workDir) { percent ->
+                val overall = (12 + percent * 82 / 100).coerceIn(12, 94)
+                onProgress("キーフレーム一致のため無劣化で書き出し中 $percent%", overall)
+            }
+            return
+        }
+
+        val concatParts = renderSmartParts(
+            planned = planned,
+            workDir = workDir,
+            sourceExtension = sourceExtension(source.displayName),
+            render = { segment, file, callback ->
+                mediaEngine.renderSmartBoundaryDescriptor(
+                    inputFd = inputFdNumber,
+                    output = file,
+                    sourceSignature = signature,
+                    segment = segment,
+                    onProgressPercent = callback,
+                )
+            },
+            onProgress = onProgress,
+        )
+        mediaEngine.concatSmartPartsDescriptors(
+            inputFd = inputFdNumber,
+            outputFd = outputFd,
+            outputName = outputName,
+            parts = concatParts,
+            expectedDurationMs = keepSegments.sumOf(MediaSegment::durationMs),
+            workingDirectory = workDir,
+            onProgressPercent = onConcatProgress,
+        )
+    }
+
+    private fun planSmartParts(
+        durationMs: Long,
+        keepSegments: List<MediaSegment>,
+        before: (Long) -> Long?,
+        after: (Long) -> Long?,
+    ): List<SmartCutPart> = buildList {
+        keepSegments.forEach { segment ->
+            val startBefore = if (segment.startMs == 0L) null else before(segment.startMs)
+            val startAfter = if (segment.startMs == 0L) null else after(segment.startMs)
+            val endBefore = if (segment.endMs == durationMs) null else before(segment.endMs)
+            val endAfter = if (segment.endMs == durationMs) null else after(segment.endMs)
+            addAll(
+                planSmartCutSegment(
+                    segment = segment,
+                    durationMs = durationMs,
+                    startPreviousSyncMs = startBefore,
+                    startNextSyncMs = startAfter,
+                    endPreviousSyncMs = endBefore,
+                    endNextSyncMs = endAfter,
+                ),
+            )
+        }
+    }
+
+    private suspend fun renderSmartParts(
+        planned: List<SmartCutPart>,
+        workDir: File,
+        sourceExtension: String,
+        render: suspend (MediaSegment, File, (Int) -> Unit) -> Unit,
+        onProgress: (String, Int?) -> Unit,
+    ): List<SmartConcatInput> {
+        val totalReencode = planned.count { it is SmartCutPart.Reencode }.coerceAtLeast(1)
+        var reencodeIndex = 0
+        val result = mutableListOf<SmartConcatInput>()
+        for (part in planned) {
+            when (part) {
+                is SmartCutPart.Copy -> result += SmartConcatInput.SourceSegment(part.segment)
+                is SmartCutPart.Reencode -> {
+                    reencodeIndex += 1
+                    val currentIndex = reencodeIndex
+                    val file = File(
+                        workDir,
+                        "smart-boundary-%03d.%s".format(currentIndex, sourceExtension),
+                    )
+                    render(part.segment, file) { percent ->
+                        val completedBefore = currentIndex - 1
+                        val fraction = (completedBefore + percent / 100.0) / totalReencode.toDouble()
+                        val overall = (12 + (fraction * 44.0).toInt()).coerceIn(12, 56)
+                        onProgress(
+                            "カット境界を高精度処理中 $currentIndex/$totalReencode  $percent%",
+                            overall,
+                        )
+                    }
+                    result += SmartConcatInput.RenderedFile(file.absolutePath)
+                }
+            }
+        }
+        return result
+    }
+
+    private fun sourceExtension(displayName: String): String =
+        displayName.substringAfterLast('.', "").lowercase().takeIf { it == "mp4" || it == "mkv" } ?: "mkv"
 
     private fun openReadDescriptor(source: PickedVideo): ParcelFileDescriptor {
         val descriptor = contentResolver.openFileDescriptor(Uri.parse(source.uri), "r")
