@@ -5,6 +5,7 @@ import android.net.Uri
 import android.provider.OpenableColumns
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import app.clipforge.media.CutMode
 import app.clipforge.media.FfmpegMediaEngine
 import app.clipforge.media.MediaSegment
 import app.clipforge.media.normalizeCutRanges
@@ -51,6 +52,7 @@ data class TrimEditorState(
     val endMs: Long,
     val thumbnailPaths: List<String>,
     val cutRanges: List<MediaSegment> = emptyList(),
+    val cutMode: CutMode = CutMode.SMART,
 ) {
     val removedDurationMs: Long
         get() = cutRanges.sumOf(MediaSegment::durationMs)
@@ -139,6 +141,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 endMs = processing.durationMs,
                                 thumbnailPaths = processing.thumbnailPaths,
                                 cutRanges = emptyList(),
+                                cutMode = CutMode.SMART,
                             ),
                             pendingDestination = null,
                             status = "再生位置を使って削除範囲を追加してください",
@@ -352,6 +355,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         outputName = pending.outputName,
                         durationMs = editor.durationMs,
                         cutRanges = editor.cutRanges,
+                        cutMode = editor.cutMode,
                     )
                 }
             }
@@ -515,6 +519,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun setCutMode(mode: CutMode) {
+        if (_uiState.value.busy) return
+        val editor = _uiState.value.trimEditor ?: return
+        if (editor.cutMode == mode) return
+        if (editor.cutRanges.isNotEmpty()) {
+            showError("カット方式を変更するには、先に削除リストをすべて解除してください")
+            return
+        }
+        _uiState.update {
+            it.copy(
+                trimEditor = editor.copy(cutMode = mode),
+                status = if (mode == CutMode.SMART) {
+                    "正確カット: 指定位置を維持し、境界だけ再エンコードします"
+                } else {
+                    "完全無劣化: カット位置をキーフレームに合わせます"
+                },
+                error = null,
+            )
+        }
+        if (mode == CutMode.LOSSLESS) snapTrimRangeToKeyframes()
+    }
+
     suspend fun adjacentKeyframe(positionMs: Long, forward: Boolean): Long? {
         val state = _uiState.value
         val editor = state.trimEditor ?: return null
@@ -531,6 +557,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun snapTrimRangeToKeyframes() {
         val editor = _uiState.value.trimEditor ?: return
+        if (editor.cutMode != CutMode.LOSSLESS) return
         val requestedStart = editor.startMs
         val requestedEnd = editor.endMs
         val source = sourceFor(editor, _uiState.value)
@@ -550,7 +577,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         current.sourceUri != editor.sourceUri ||
                         current.sessionPath != editor.sessionPath ||
                         current.startMs != requestedStart ||
-                        current.endMs != requestedEnd
+                        current.endMs != requestedEnd ||
+                        current.cutMode != CutMode.LOSSLESS
                     ) {
                         return@update state
                     }
@@ -568,8 +596,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (_uiState.value.busy) return
         val requestedStart = editor.startMs
         val requestedEnd = editor.endMs
-        val source = sourceFor(editor, _uiState.value)
 
+        if (editor.cutMode == CutMode.SMART) {
+            val candidate = MediaSegment(requestedStart, requestedEnd)
+            val normalized = normalizeCutRanges(editor.durationMs, editor.cutRanges + candidate)
+            if (remainingSegments(editor.durationMs, normalized).isEmpty()) {
+                showError("動画全体を削除する範囲は追加できません")
+                return
+            }
+            _uiState.update { state ->
+                val current = state.trimEditor ?: return@update state
+                if (current.sessionPath != editor.sessionPath) return@update state
+                state.copy(
+                    trimEditor = current.copy(cutRanges = normalized),
+                    status = "指定位置のまま削除範囲を追加しました（${normalized.size}箇所）",
+                    error = null,
+                )
+            }
+            return
+        }
+
+        val source = sourceFor(editor, _uiState.value)
         viewModelScope.launch {
             _uiState.update {
                 it.copy(
@@ -602,7 +649,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             endMs = candidate.endMs,
                             cutRanges = normalized,
                         ),
-                        status = "削除範囲を追加しました（${normalized.size}箇所）",
+                        status = "無劣化の削除範囲を追加しました（${normalized.size}箇所）",
                         error = null,
                     )
                 }
