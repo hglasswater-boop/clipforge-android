@@ -30,8 +30,9 @@ class MultiCutExporter(
         cutRanges: List<MediaSegment>,
         outputUri: String,
         outputName: String,
-        onProgress: (String) -> Unit = {},
+        onProgress: (message: String, progressPercent: Int?) -> Unit = { _, _ -> },
     ) = withContext(Dispatchers.IO) {
+        onProgress("保存内容を確認しています", 2)
         val keepSegments = remainingSegments(durationMs, cutRanges)
         require(keepSegments.isNotEmpty()) { "動画全体を削除する指定になっています" }
 
@@ -41,15 +42,27 @@ class MultiCutExporter(
         val workDir = File(cacheRoot, "clipforge/multi-cut/${UUID.randomUUID()}").apply { mkdirs() }
         var inputDescriptor: ParcelFileDescriptor? = null
         var outputDescriptor: ParcelFileDescriptor? = null
+        var lastWritePercent = -1
+
+        fun reportWriteProgress(percent: Int) {
+            val safe = percent.coerceIn(0, 100)
+            if (safe == lastWritePercent) return
+            lastWritePercent = safe
+            val overall = (10 + (safe * 84 / 100)).coerceIn(10, 94)
+            onProgress(
+                "無劣化で書き出し中 $safe%（削除 ${cutRanges.size}箇所）",
+                overall,
+            )
+        }
 
         try {
-            onProgress("入力と${destinationLabel}保存先を開いています")
+            onProgress("${destinationLabel}保存先を開いています", 5)
             outputDescriptor = openReadWriteDescriptor(destination)
 
             if (localInputPath != null) {
                 val input = File(localInputPath)
                 require(input.isFile) { "編集用キャッシュが見つかりません" }
-                onProgress("${cutRanges.size}箇所を反映して無劣化保存中")
+                onProgress("編集データを読み込んでいます", 8)
                 if (keepSegments.size == 1) {
                     val segment = keepSegments.single()
                     mediaEngine.cutLosslessToDescriptor(
@@ -58,6 +71,7 @@ class MultiCutExporter(
                         outputName = outputName,
                         startMs = segment.startMs,
                         endMs = segment.endMs,
+                        onProgressPercent = ::reportWriteProgress,
                     )
                 } else {
                     mediaEngine.concatSegmentsLosslessToDescriptor(
@@ -66,11 +80,12 @@ class MultiCutExporter(
                         outputName = outputName,
                         segments = keepSegments,
                         workingDirectory = workDir,
+                        onProgressPercent = ::reportWriteProgress,
                     )
                 }
             } else {
+                onProgress("元動画を直接開いています", 8)
                 inputDescriptor = openReadDescriptor(source)
-                onProgress("${cutRanges.size}箇所を反映して無劣化保存中")
                 if (keepSegments.size == 1) {
                     val segment = keepSegments.single()
                     mediaEngine.cutLosslessDescriptors(
@@ -79,6 +94,7 @@ class MultiCutExporter(
                         outputName = outputName,
                         startMs = segment.startMs,
                         endMs = segment.endMs,
+                        onProgressPercent = ::reportWriteProgress,
                     )
                 } else {
                     mediaEngine.concatSegmentsLosslessDescriptors(
@@ -87,21 +103,23 @@ class MultiCutExporter(
                         outputName = outputName,
                         segments = keepSegments,
                         workingDirectory = workDir,
+                        onProgressPercent = ::reportWriteProgress,
                     )
                 }
             }
 
+            onProgress("書き出しを完了しています", 95)
             runCatching { outputDescriptor.close() }
             outputDescriptor = null
             runCatching { inputDescriptor?.close() }
             inputDescriptor = null
 
             if (remoteDestination) {
-                onProgress("SMB保存を確定しています")
+                onProgress("SMB保存を確定しています", 98)
                 commitRemoteOutput(destination)
-                onProgress("SMBへ保存しました")
+                onProgress("SMBへ保存しました", 100)
             } else {
-                onProgress("端末へ保存しました")
+                onProgress("端末へ保存しました", 100)
             }
             discardSession(sessionPath)
         } catch (error: Throwable) {
