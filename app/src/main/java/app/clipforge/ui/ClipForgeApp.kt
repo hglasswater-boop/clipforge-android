@@ -24,7 +24,6 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.matchParentSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -479,12 +478,13 @@ private fun TrimEditorScreen(viewModel: MainViewModel, state: MainUiState, edito
                     enabled = !state.busy,
                     canUndo = state.canUndoEdit,
                     onSelect = { index ->
-                        val range = editor.cutRanges.getOrNull(index) ?: return@CutRangeList
-                        previewSelection = false
-                        player.pause()
-                        player.seekTo(range.startMs)
-                        playheadMs = range.startMs
-                        viewModel.selectCutRange(index)
+                        editor.cutRanges.getOrNull(index)?.let { range ->
+                            previewSelection = false
+                            player.pause()
+                            player.seekTo(range.startMs)
+                            playheadMs = range.startMs
+                            viewModel.selectCutRange(index)
+                        }
                     },
                     onRemove = viewModel::removeCutRange,
                     onClear = viewModel::clearCutRanges,
@@ -1012,7 +1012,7 @@ private fun TimelineThumbnailStrip(
             },
     ) {
         Row(
-            modifier = Modifier.matchParentSize(),
+            modifier = Modifier.fillMaxSize(),
             horizontalArrangement = Arrangement.spacedBy(1.dp),
         ) {
             slots.forEach { path ->
@@ -1036,7 +1036,7 @@ private fun TimelineThumbnailStrip(
                 }
             }
         }
-        Canvas(Modifier.matchParentSize()) {
+        Canvas(Modifier.fillMaxSize()) {
             fun xFor(ms: Long): Float =
                 (size.width * (ms.coerceIn(0L, durationMs).toDouble() / durationMs.toDouble())).toFloat()
 
