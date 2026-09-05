@@ -41,13 +41,16 @@ internal fun fdConcatScript(inputs: List<NamedMediaDescriptor>): String = buildS
     }
 }
 
-internal fun fdSegmentConcatScript(fd: Int, segments: List<MediaSegment>): String = buildString {
-    appendLine("ffconcat version 1.0")
-    segments.forEach { segment ->
-        appendLine("file 'fd:'")
-        appendLine("option fd $fd")
-        appendLine("inpoint ${concatTimestamp(segment.startMs)}")
-        appendLine("outpoint ${concatTimestamp(segment.endMs)}")
+internal fun fdSegmentConcatScript(fds: List<Int>, segments: List<MediaSegment>): String {
+    require(fds.size == segments.size) { "Each source segment needs an independent fd" }
+    return buildString {
+        appendLine("ffconcat version 1.0")
+        segments.forEachIndexed { index, segment ->
+            appendLine("file 'fd:'")
+            appendLine("option fd ${fds[index]}")
+            appendLine("inpoint ${concatTimestamp(segment.startMs)}")
+            appendLine("outpoint ${concatTimestamp(segment.endMs)}")
+        }
     }
 }
 
@@ -76,18 +79,23 @@ private fun pathSmartConcatScript(path: String, parts: List<SmartConcatInput>): 
     }
 }
 
-private fun fdSmartConcatScript(fd: Int, parts: List<SmartConcatInput>): String = buildString {
-    appendLine("ffconcat version 1.0")
-    parts.forEach { part ->
-        when (part) {
-            is SmartConcatInput.SourceSegment -> {
-                appendLine("file 'fd:'")
-                appendLine("option fd $fd")
-                appendLine("inpoint ${concatTimestamp(part.segment.startMs)}")
-                appendLine("outpoint ${concatTimestamp(part.segment.endMs)}")
-            }
-            is SmartConcatInput.RenderedFile -> {
-                appendLine("file '${escapeConcatPathValue(part.path)}'")
+internal fun fdSmartConcatScript(fds: List<Int>, parts: List<SmartConcatInput>): String {
+    val sourceCount = parts.count { it is SmartConcatInput.SourceSegment }
+    require(fds.size == sourceCount) { "Each smart-copy source segment needs an independent fd" }
+    var sourceIndex = 0
+    return buildString {
+        appendLine("ffconcat version 1.0")
+        parts.forEach { part ->
+            when (part) {
+                is SmartConcatInput.SourceSegment -> {
+                    appendLine("file 'fd:'")
+                    appendLine("option fd ${fds[sourceIndex++]}")
+                    appendLine("inpoint ${concatTimestamp(part.segment.startMs)}")
+                    appendLine("outpoint ${concatTimestamp(part.segment.endMs)}")
+                }
+                is SmartConcatInput.RenderedFile -> {
+                    appendLine("file '${escapeConcatPathValue(part.path)}'")
+                }
             }
         }
     }
@@ -509,7 +517,7 @@ class FfmpegMediaEngine {
     }
 
     suspend fun concatSmartPartsDescriptors(
-        inputFd: Int,
+        inputFds: List<Int>,
         outputFd: Int,
         outputName: String,
         parts: List<SmartConcatInput>,
@@ -518,8 +526,8 @@ class FfmpegMediaEngine {
         onProgressPercent: (Int) -> Unit = {},
     ) = withContext(Dispatchers.IO) {
         concatSmartParts(
-            script = fdSmartConcatScript(inputFd, parts),
-            usesFdSource = true,
+            script = fdSmartConcatScript(inputFds, parts),
+            usesFdSource = inputFds.isNotEmpty(),
             outputFd = outputFd,
             outputName = outputName,
             expectedDurationMs = expectedDurationMs,
@@ -611,7 +619,7 @@ class FfmpegMediaEngine {
 
     /** Same as [concatSegmentsLosslessToDescriptor], but the source is a seekable Android fd. */
     suspend fun concatSegmentsLosslessDescriptors(
-        inputFd: Int,
+        inputFds: List<Int>,
         outputFd: Int,
         outputName: String,
         segments: List<MediaSegment>,
@@ -619,10 +627,11 @@ class FfmpegMediaEngine {
         onProgressPercent: (Int) -> Unit = {},
     ) = withContext(Dispatchers.IO) {
         require(segments.size >= 2) { "At least two segments are required" }
+        require(inputFds.size == segments.size) { "Each source segment needs an independent fd" }
         workingDirectory.mkdirs()
         val listFile = File(workingDirectory, ".clipforge-segments-${System.nanoTime()}.ffconcat")
         try {
-            listFile.writeText(fdSegmentConcatScript(inputFd, segments))
+            listFile.writeText(fdSegmentConcatScript(inputFds, segments))
             runFfmpeg(
                 arguments = listOf(
                     "-hide_banner", "-y",
