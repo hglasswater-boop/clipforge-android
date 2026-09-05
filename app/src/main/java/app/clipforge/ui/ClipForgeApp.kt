@@ -10,6 +10,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -749,7 +750,14 @@ private fun TrimRangeControls(viewModel: MainViewModel, player: ExoPlayer, edito
     val endFraction = (editor.endMs.toDouble() / duration).toFloat().coerceIn(0f, 1f)
 
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        TimelineThumbnailStrip(editor.thumbnailPaths)
+        TimelineThumbnailStrip(
+            paths = editor.thumbnailPaths,
+            durationMs = duration,
+            onSeek = { targetMs ->
+                player.pause()
+                player.seekTo(targetMs)
+            },
+        )
         RangeSlider(
             value = startFraction..endFraction,
             onValueChange = { range ->
@@ -777,10 +785,27 @@ private fun TrimRangeControls(viewModel: MainViewModel, player: ExoPlayer, edito
 }
 
 @Composable
-private fun TimelineThumbnailStrip(paths: List<String>) {
+private fun TimelineThumbnailStrip(
+    paths: List<String>,
+    durationMs: Long,
+    onSeek: (Long) -> Unit,
+) {
     if (paths.isEmpty()) return
     Row(
-        modifier = Modifier.fillMaxWidth().height(68.dp).clip(RoundedCornerShape(8.dp)),
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(68.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .pointerInput(durationMs) {
+                detectTapGestures { offset ->
+                    val width = size.width.toFloat().coerceAtLeast(1f)
+                    val fraction = (offset.x / width).coerceIn(0f, 1f)
+                    val targetMs = (durationMs.toDouble() * fraction.toDouble())
+                        .roundToLong()
+                        .coerceIn(0L, durationMs)
+                    onSeek(targetMs)
+                }
+            },
         horizontalArrangement = Arrangement.spacedBy(1.dp),
     ) {
         paths.forEach { path ->
