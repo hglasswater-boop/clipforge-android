@@ -1,12 +1,16 @@
 package app.clipforge.media
 
 import com.arthenica.ffmpegkit.FFmpegKit
+import com.arthenica.ffmpegkit.FFmpegSession
 import com.arthenica.ffmpegkit.FFprobeKit
 import com.arthenica.ffmpegkit.ReturnCode
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
+import kotlin.math.roundToInt
 import kotlin.math.roundToLong
 
 data class NamedMediaPath(
@@ -278,6 +282,7 @@ class FfmpegMediaEngine {
         outputName: String,
         startMs: Long,
         endMs: Long?,
+        onProgressPercent: (Int) -> Unit = {},
     ) = withContext(Dispatchers.IO) {
         require(startMs >= 0) { "startMs must be >= 0" }
         require(endMs == null || endMs > startMs) { "endMs must be greater than startMs" }
@@ -299,7 +304,11 @@ class FfmpegMediaEngine {
             "-fd", outputFd.toString(),
             "fd:",
         )
-        runFfmpeg(args)
+        runFfmpeg(
+            arguments = args,
+            expectedDurationMs = endMs?.minus(startMs),
+            onProgressPercent = onProgressPercent,
+        )
     }
 
     /**
@@ -312,6 +321,7 @@ class FfmpegMediaEngine {
         outputName: String,
         startMs: Long,
         endMs: Long?,
+        onProgressPercent: (Int) -> Unit = {},
     ) = withContext(Dispatchers.IO) {
         require(startMs >= 0) { "startMs must be >= 0" }
         require(endMs == null || endMs > startMs) { "endMs must be greater than startMs" }
@@ -334,7 +344,11 @@ class FfmpegMediaEngine {
             "-fd", outputFd.toString(),
             "fd:",
         )
-        runFfmpeg(args)
+        runFfmpeg(
+            arguments = args,
+            expectedDurationMs = endMs?.minus(startMs),
+            onProgressPercent = onProgressPercent,
+        )
     }
 
     /**
@@ -347,6 +361,7 @@ class FfmpegMediaEngine {
         outputName: String,
         segments: List<MediaSegment>,
         workingDirectory: File,
+        onProgressPercent: (Int) -> Unit = {},
     ) = withContext(Dispatchers.IO) {
         require(segments.size >= 2) { "At least two segments are required" }
         workingDirectory.mkdirs()
@@ -354,7 +369,7 @@ class FfmpegMediaEngine {
         try {
             listFile.writeText(pathSegmentConcatScript(inputPath, segments))
             runFfmpeg(
-                listOf(
+                arguments = listOf(
                     "-hide_banner", "-y",
                     "-f", "concat",
                     "-safe", "0",
@@ -368,6 +383,8 @@ class FfmpegMediaEngine {
                     "-fd", outputFd.toString(),
                     "fd:",
                 ),
+                expectedDurationMs = segments.sumOf(MediaSegment::durationMs),
+                onProgressPercent = onProgressPercent,
             )
         } finally {
             listFile.delete()
@@ -381,6 +398,7 @@ class FfmpegMediaEngine {
         outputName: String,
         segments: List<MediaSegment>,
         workingDirectory: File,
+        onProgressPercent: (Int) -> Unit = {},
     ) = withContext(Dispatchers.IO) {
         require(segments.size >= 2) { "At least two segments are required" }
         workingDirectory.mkdirs()
@@ -388,7 +406,7 @@ class FfmpegMediaEngine {
         try {
             listFile.writeText(fdSegmentConcatScript(inputFd, segments))
             runFfmpeg(
-                listOf(
+                arguments = listOf(
                     "-hide_banner", "-y",
                     "-protocol_whitelist", "file,fd,crypto,data",
                     "-f", "concat",
@@ -403,6 +421,8 @@ class FfmpegMediaEngine {
                     "-fd", outputFd.toString(),
                     "fd:",
                 ),
+                expectedDurationMs = segments.sumOf(MediaSegment::durationMs),
+                onProgressPercent = onProgressPercent,
             )
         } finally {
             listFile.delete()
@@ -530,10 +550,41 @@ class FfmpegMediaEngine {
         }
     }
 
-    private fun runFfmpeg(arguments: List<String>) {
-        val session = FFmpegKit.executeWithArguments(arguments.toTypedArray())
-        if (!ReturnCode.isSuccess(session.returnCode)) {
-            throw MediaCommandException(session.allLogsAsString.ifBlank { "FFmpeg command failed" })
+    private suspend fun runFfmpeg(
+        arguments: List<String>,
+        expectedDurationMs: Long? = null,
+        onProgressPercent: (Int) -> Unit = {},
+    ) {
+        val completion = CompletableDeferred<FFmpegSession>()
+        val session = FFmpegKit.executeWithArgumentsAsync(
+            arguments.toTypedArray(),
+            { completed -> completion.complete(completed) },
+            null,
+            { statistics ->
+                expectedDurationMs
+                    ?.takeIf { it > 0L }
+                    ?.let { durationMs ->
+                        val percent = ((statistics.time / durationMs.toDouble()) * 100.0)
+                            .roundToInt()
+                            .coerceIn(0, 99)
+                        onProgressPercent(percent)
+                    }
+            },
+        )
+
+        try {
+            val completed = completion.await()
+            if (!ReturnCode.isSuccess(completed.returnCode)) {
+                throw MediaCommandException(
+                    completed.allLogsAsString.ifBlank { "FFmpeg command failed" },
+                )
+            }
+            if (expectedDurationMs != null && expectedDurationMs > 0L) {
+                onProgressPercent(100)
+            }
+        } catch (cancelled: CancellationException) {
+            FFmpegKit.cancel(session.sessionId)
+            throw cancelled
         }
     }
 
