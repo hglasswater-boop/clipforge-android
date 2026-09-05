@@ -353,30 +353,31 @@ class MultiCutExporter(
     ): List<SmartConcatInput> {
         val totalReencode = planned.count { it is SmartCutPart.Reencode }.coerceAtLeast(1)
         var reencodeIndex = 0
-        return buildList {
-            planned.forEach { part ->
-                when (part) {
-                    is SmartCutPart.Copy -> add(SmartConcatInput.SourceSegment(part.segment))
-                    is SmartCutPart.Reencode -> {
-                        reencodeIndex += 1
-                        val file = File(
-                            workDir,
-                            "smart-boundary-%03d.%s".format(reencodeIndex, sourceExtension),
+        val result = mutableListOf<SmartConcatInput>()
+        for (part in planned) {
+            when (part) {
+                is SmartCutPart.Copy -> result += SmartConcatInput.SourceSegment(part.segment)
+                is SmartCutPart.Reencode -> {
+                    reencodeIndex += 1
+                    val currentIndex = reencodeIndex
+                    val file = File(
+                        workDir,
+                        "smart-boundary-%03d.%s".format(currentIndex, sourceExtension),
+                    )
+                    render(part.segment, file) { percent ->
+                        val completedBefore = currentIndex - 1
+                        val fraction = (completedBefore + percent / 100.0) / totalReencode.toDouble()
+                        val overall = (12 + (fraction * 44.0).toInt()).coerceIn(12, 56)
+                        onProgress(
+                            "カット境界を高精度処理中 $currentIndex/$totalReencode  $percent%",
+                            overall,
                         )
-                        render(part.segment, file) { percent ->
-                            val completedBefore = reencodeIndex - 1
-                            val fraction = (completedBefore + percent / 100.0) / totalReencode.toDouble()
-                            val overall = (12 + (fraction * 44.0).toInt()).coerceIn(12, 56)
-                            onProgress(
-                                "カット境界を高精度処理中 $reencodeIndex/$totalReencode  $percent%",
-                                overall,
-                            )
-                        }
-                        add(SmartConcatInput.RenderedFile(file.absolutePath))
                     }
+                    result += SmartConcatInput.RenderedFile(file.absolutePath)
                 }
             }
         }
+        return result
     }
 
     private fun sourceExtension(displayName: String): String =
