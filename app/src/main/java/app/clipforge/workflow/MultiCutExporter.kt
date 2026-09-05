@@ -97,30 +97,30 @@ class MultiCutExporter(
                         onProgress = ::reportLosslessWriteProgress,
                     )
                 }
-} else {
-    onProgress("元動画を直接開いています", 8)
-    if (cutMode == CutMode.SMART) {
-        exportSmartDescriptor(
-            source = source,
-            durationMs = durationMs,
-            keepSegments = keepSegments,
-            outputFd = outputDescriptor.fd,
-            outputName = outputName,
-            workDir = workDir,
-            onProgress = onProgress,
-            onConcatProgress = ::reportSmartConcatProgress,
-        )
-    } else {
-        exportLosslessDescriptor(
-            source = source,
-            keepSegments = keepSegments,
-            outputFd = outputDescriptor.fd,
-            outputName = outputName,
-            workDir = workDir,
-            onProgress = ::reportLosslessWriteProgress,
-        )
-    }
-}
+            } else {
+                onProgress("元動画を直接開いています", 8)
+                if (cutMode == CutMode.SMART) {
+                    exportSmartDescriptor(
+                        source = source,
+                        durationMs = durationMs,
+                        keepSegments = keepSegments,
+                        outputFd = outputDescriptor.fd,
+                        outputName = outputName,
+                        workDir = workDir,
+                        onProgress = onProgress,
+                        onConcatProgress = ::reportSmartConcatProgress,
+                    )
+                } else {
+                    exportLosslessDescriptor(
+                        source = source,
+                        keepSegments = keepSegments,
+                        outputFd = outputDescriptor.fd,
+                        outputName = outputName,
+                        workDir = workDir,
+                        onProgress = ::reportLosslessWriteProgress,
+                    )
+                }
+            }
 
             onProgress("書き出しを完了しています", 95)
             runCatching { outputDescriptor.close() }
@@ -173,38 +173,38 @@ class MultiCutExporter(
         }
     }
 
-private suspend fun exportLosslessDescriptor(
-    source: PickedVideo,
-    keepSegments: List<MediaSegment>,
-    outputFd: Int,
-    outputName: String,
-    workDir: File,
-    onProgress: (Int) -> Unit,
-) {
-    val descriptorCount = if (keepSegments.size == 1) 1 else keepSegments.size
-    withReadDescriptors(source, descriptorCount) { descriptors ->
-        if (keepSegments.size == 1) {
-            val segment = keepSegments.single()
-            mediaEngine.cutLosslessDescriptors(
-                inputFd = descriptors.single().fd,
-                outputFd = outputFd,
-                outputName = outputName,
-                startMs = segment.startMs,
-                endMs = segment.endMs,
-                onProgressPercent = onProgress,
-            )
-        } else {
-            mediaEngine.concatSegmentsLosslessDescriptors(
-                inputFds = descriptors.map { it.fd },
-                outputFd = outputFd,
-                outputName = outputName,
-                segments = keepSegments,
-                workingDirectory = workDir,
-                onProgressPercent = onProgress,
-            )
+    private suspend fun exportLosslessDescriptor(
+        source: PickedVideo,
+        keepSegments: List<MediaSegment>,
+        outputFd: Int,
+        outputName: String,
+        workDir: File,
+        onProgress: (Int) -> Unit,
+    ) {
+        val descriptorCount = if (keepSegments.size == 1) 1 else keepSegments.size
+        withReadDescriptors(source, descriptorCount) { descriptors ->
+            if (keepSegments.size == 1) {
+                val segment = keepSegments.single()
+                mediaEngine.cutLosslessDescriptors(
+                    inputFd = descriptors.single().fd,
+                    outputFd = outputFd,
+                    outputName = outputName,
+                    startMs = segment.startMs,
+                    endMs = segment.endMs,
+                    onProgressPercent = onProgress,
+                )
+            } else {
+                mediaEngine.concatSegmentsLosslessDescriptors(
+                    inputFds = descriptors.map { it.fd },
+                    outputFd = outputFd,
+                    outputName = outputName,
+                    segments = keepSegments,
+                    workingDirectory = workDir,
+                    onProgressPercent = onProgress,
+                )
+            }
         }
     }
-}
 
     private suspend fun exportSmartLocal(
         input: File,
@@ -260,73 +260,73 @@ private suspend fun exportLosslessDescriptor(
         )
     }
 
-private suspend fun exportSmartDescriptor(
-    source: PickedVideo,
-    durationMs: Long,
-    keepSegments: List<MediaSegment>,
-    outputFd: Int,
-    outputName: String,
-    workDir: File,
-    onProgress: (String, Int?) -> Unit,
-    onConcatProgress: (Int) -> Unit,
-) {
-    onProgress("スマートカットの境界を確認しています", 10)
-    val signature = withReadDescriptors(source, 1) { descriptors ->
-        mediaEngine.probeDescriptor(descriptors.single().fd, source.displayName)
-    }
-    val planned = planSmartParts(
-        durationMs = durationMs,
-        keepSegments = keepSegments,
-        before = { position ->
-            openReadDescriptor(source).use { descriptor ->
-                syncFrameResolver.syncFrameAtOrBefore(descriptor.fileDescriptor, durationMs, position)
-            }
-        },
-        after = { position ->
-            openReadDescriptor(source).use { descriptor ->
-                syncFrameResolver.syncFrameAtOrAfter(descriptor.fileDescriptor, durationMs, position)
-            }
-        },
-    )
-    val reencodeCount = planned.count { it is SmartCutPart.Reencode }
-    if (reencodeCount == 0) {
-        exportLosslessDescriptor(source, keepSegments, outputFd, outputName, workDir) { percent ->
-            val overall = (12 + percent * 82 / 100).coerceIn(12, 94)
-            onProgress("キーフレーム一致のため無劣化で書き出し中 $percent%", overall)
+    private suspend fun exportSmartDescriptor(
+        source: PickedVideo,
+        durationMs: Long,
+        keepSegments: List<MediaSegment>,
+        outputFd: Int,
+        outputName: String,
+        workDir: File,
+        onProgress: (String, Int?) -> Unit,
+        onConcatProgress: (Int) -> Unit,
+    ) {
+        onProgress("スマートカットの境界を確認しています", 10)
+        val signature = withReadDescriptors(source, 1) { descriptors ->
+            mediaEngine.probeDescriptor(descriptors.single().fd, source.displayName)
         }
-        return
-    }
-
-    val concatParts = renderSmartParts(
-        planned = planned,
-        workDir = workDir,
-        sourceExtension = sourceExtension(source.displayName),
-        render = { segment, file, callback ->
-            withReadDescriptors(source, 1) { descriptors ->
-                mediaEngine.renderSmartBoundaryDescriptor(
-                    inputFd = descriptors.single().fd,
-                    output = file,
-                    sourceSignature = signature,
-                    segment = segment,
-                    onProgressPercent = callback,
-                )
-            }
-        },
-        onProgress = onProgress,
-    )
-    val sourcePartCount = concatParts.count { it is SmartConcatInput.SourceSegment }
-    withReadDescriptors(source, sourcePartCount) { descriptors ->
-        mediaEngine.concatSmartPartsDescriptors(
-            inputFds = descriptors.map { it.fd },
-            outputFd = outputFd,
-            outputName = outputName,
-            parts = concatParts,
-            expectedDurationMs = keepSegments.sumOf(MediaSegment::durationMs),
-            workingDirectory = workDir,
-            onProgressPercent = onConcatProgress,
+        val planned = planSmartParts(
+            durationMs = durationMs,
+            keepSegments = keepSegments,
+            before = { position ->
+                openReadDescriptor(source).use { descriptor ->
+                    syncFrameResolver.syncFrameAtOrBefore(descriptor.fileDescriptor, durationMs, position)
+                }
+            },
+            after = { position ->
+                openReadDescriptor(source).use { descriptor ->
+                    syncFrameResolver.syncFrameAtOrAfter(descriptor.fileDescriptor, durationMs, position)
+                }
+            },
         )
+        val reencodeCount = planned.count { it is SmartCutPart.Reencode }
+        if (reencodeCount == 0) {
+            exportLosslessDescriptor(source, keepSegments, outputFd, outputName, workDir) { percent ->
+                val overall = (12 + percent * 82 / 100).coerceIn(12, 94)
+                onProgress("キーフレーム一致のため無劣化で書き出し中 $percent%", overall)
+            }
+            return
+        }
+
+        val concatParts = renderSmartParts(
+            planned = planned,
+            workDir = workDir,
+            sourceExtension = sourceExtension(source.displayName),
+            render = { segment, file, callback ->
+                withReadDescriptors(source, 1) { descriptors ->
+                    mediaEngine.renderSmartBoundaryDescriptor(
+                        inputFd = descriptors.single().fd,
+                        output = file,
+                        sourceSignature = signature,
+                        segment = segment,
+                        onProgressPercent = callback,
+                    )
+                }
+            },
+            onProgress = onProgress,
+        )
+        val sourcePartCount = concatParts.count { it is SmartConcatInput.SourceSegment }
+        withReadDescriptors(source, sourcePartCount) { descriptors ->
+            mediaEngine.concatSmartPartsDescriptors(
+                inputFds = descriptors.map { it.fd },
+                outputFd = outputFd,
+                outputName = outputName,
+                parts = concatParts,
+                expectedDurationMs = keepSegments.sumOf(MediaSegment::durationMs),
+                workingDirectory = workDir,
+                onProgressPercent = onConcatProgress,
+            )
+        }
     }
-}
 
     private fun planSmartParts(
         durationMs: Long,
@@ -388,22 +388,22 @@ private suspend fun exportSmartDescriptor(
         return result
     }
 
-private suspend fun <T> withReadDescriptors(
-    source: PickedVideo,
-    count: Int,
-    block: suspend (List<ParcelFileDescriptor>) -> T,
-): T {
-    require(count >= 0) { "Descriptor count must not be negative" }
-    val descriptors = mutableListOf<ParcelFileDescriptor>()
-    try {
-        repeat(count) { descriptors += openReadDescriptor(source) }
-        return block(descriptors)
-    } finally {
-        descriptors.asReversed().forEach { descriptor ->
-            runCatching { descriptor.close() }
+    private suspend fun <T> withReadDescriptors(
+        source: PickedVideo,
+        count: Int,
+        block: suspend (List<ParcelFileDescriptor>) -> T,
+    ): T {
+        require(count >= 0) { "Descriptor count must not be negative" }
+        val descriptors = mutableListOf<ParcelFileDescriptor>()
+        try {
+            repeat(count) { descriptors += openReadDescriptor(source) }
+            return block(descriptors)
+        } finally {
+            descriptors.asReversed().forEach { descriptor ->
+                runCatching { descriptor.close() }
+            }
         }
     }
-}
 
     private fun sourceExtension(displayName: String): String =
         displayName.substringAfterLast('.', "").lowercase().takeIf { it == "mp4" || it == "mkv" } ?: "mkv"

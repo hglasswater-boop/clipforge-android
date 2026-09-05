@@ -516,25 +516,25 @@ class FfmpegMediaEngine {
         )
     }
 
-suspend fun concatSmartPartsDescriptors(
-    inputFds: List<Int>,
-    outputFd: Int,
-    outputName: String,
-    parts: List<SmartConcatInput>,
-    expectedDurationMs: Long,
-    workingDirectory: File,
-    onProgressPercent: (Int) -> Unit = {},
-) = withContext(Dispatchers.IO) {
-    concatSmartParts(
-        script = fdSmartConcatScript(inputFds, parts),
-        usesFdSource = inputFds.isNotEmpty(),
-        outputFd = outputFd,
-        outputName = outputName,
-        expectedDurationMs = expectedDurationMs,
-        workingDirectory = workingDirectory,
-        onProgressPercent = onProgressPercent,
-    )
-}
+    suspend fun concatSmartPartsDescriptors(
+        inputFds: List<Int>,
+        outputFd: Int,
+        outputName: String,
+        parts: List<SmartConcatInput>,
+        expectedDurationMs: Long,
+        workingDirectory: File,
+        onProgressPercent: (Int) -> Unit = {},
+    ) = withContext(Dispatchers.IO) {
+        concatSmartParts(
+            script = fdSmartConcatScript(inputFds, parts),
+            usesFdSource = inputFds.isNotEmpty(),
+            outputFd = outputFd,
+            outputName = outputName,
+            expectedDurationMs = expectedDurationMs,
+            workingDirectory = workingDirectory,
+            onProgressPercent = onProgressPercent,
+        )
+    }
 
     private suspend fun concatSmartParts(
         script: String,
@@ -618,43 +618,43 @@ suspend fun concatSmartPartsDescriptors(
     }
 
     /** Same as [concatSegmentsLosslessToDescriptor], but the source is a seekable Android fd. */
-suspend fun concatSegmentsLosslessDescriptors(
-    inputFds: List<Int>,
-    outputFd: Int,
-    outputName: String,
-    segments: List<MediaSegment>,
-    workingDirectory: File,
-    onProgressPercent: (Int) -> Unit = {},
-) = withContext(Dispatchers.IO) {
-    require(segments.size >= 2) { "At least two segments are required" }
-    require(inputFds.size == segments.size) { "Each source segment needs an independent fd" }
-    workingDirectory.mkdirs()
-    val listFile = File(workingDirectory, ".clipforge-segments-${System.nanoTime()}.ffconcat")
-    try {
-        listFile.writeText(fdSegmentConcatScript(inputFds, segments))
-        runFfmpeg(
-            arguments = listOf(
-                "-hide_banner", "-y",
-                "-protocol_whitelist", "file,fd,crypto,data",
-                "-f", "concat",
-                "-safe", "0",
-                "-auto_convert", "1",
-                "-i", listFile.absolutePath,
-                "-map", "0",
-                "-c", "copy",
-                "-fflags", "+genpts",
-                "-avoid_negative_ts", "make_zero",
-                "-f", muxerFor(outputName),
-                "-fd", outputFd.toString(),
-                "fd:",
-            ),
-            expectedDurationMs = segments.sumOf(MediaSegment::durationMs),
-            onProgressPercent = onProgressPercent,
-        )
-    } finally {
-        listFile.delete()
+    suspend fun concatSegmentsLosslessDescriptors(
+        inputFds: List<Int>,
+        outputFd: Int,
+        outputName: String,
+        segments: List<MediaSegment>,
+        workingDirectory: File,
+        onProgressPercent: (Int) -> Unit = {},
+    ) = withContext(Dispatchers.IO) {
+        require(segments.size >= 2) { "At least two segments are required" }
+        require(inputFds.size == segments.size) { "Each source segment needs an independent fd" }
+        workingDirectory.mkdirs()
+        val listFile = File(workingDirectory, ".clipforge-segments-${System.nanoTime()}.ffconcat")
+        try {
+            listFile.writeText(fdSegmentConcatScript(inputFds, segments))
+            runFfmpeg(
+                arguments = listOf(
+                    "-hide_banner", "-y",
+                    "-protocol_whitelist", "file,fd,crypto,data",
+                    "-f", "concat",
+                    "-safe", "0",
+                    "-auto_convert", "1",
+                    "-i", listFile.absolutePath,
+                    "-map", "0",
+                    "-c", "copy",
+                    "-fflags", "+genpts",
+                    "-avoid_negative_ts", "make_zero",
+                    "-f", muxerFor(outputName),
+                    "-fd", outputFd.toString(),
+                    "fd:",
+                ),
+                expectedDurationMs = segments.sumOf(MediaSegment::durationMs),
+                onProgressPercent = onProgressPercent,
+            )
+        } finally {
+            listFile.delete()
+        }
     }
-}
 
     suspend fun concatLossless(inputs: List<File>, output: File): File = withContext(Dispatchers.IO) {
         require(inputs.size >= 2) { "At least two files are required" }
