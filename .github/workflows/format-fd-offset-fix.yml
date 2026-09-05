@@ -1,0 +1,105 @@
+name: Format FD isolation fix
+
+on:
+  push:
+    branches: [ fix/fd-offset-isolation ]
+    paths:
+      - .github/workflows/format-fd-offset-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  format-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 2
+      - name: Normalize indentation
+        shell: python
+        run: |
+          from pathlib import Path
+
+          def indent_block(text: str, start: str, end: str, spaces: int, label: str) -> str:
+              s = text.find(start)
+              if s < 0:
+                  raise RuntimeError(f"{label}: start marker not found")
+              e = text.find(end, s)
+              if e < 0:
+                  raise RuntimeError(f"{label}: end marker not found")
+              block = text[s:e]
+              prefix = " " * spaces
+              formatted = "\n".join(prefix + line if line else line for line in block.split("\n"))
+              return text[:s] + formatted + text[e:]
+
+          exporter_path = Path("app/src/main/java/app/clipforge/workflow/MultiCutExporter.kt")
+          exporter = exporter_path.read_text()
+          exporter = indent_block(
+              exporter,
+              '} else {\n    onProgress("元動画を直接開いています", 8)',
+              '\n\n            onProgress("書き出しを完了しています", 95)',
+              12,
+              "remote export block",
+          )
+          exporter = indent_block(
+              exporter,
+              "private suspend fun exportLosslessDescriptor(",
+              "\n\n    private suspend fun exportSmartLocal(",
+              4,
+              "lossless descriptor function",
+          )
+          exporter = indent_block(
+              exporter,
+              "private suspend fun exportSmartDescriptor(",
+              "\n\n    private fun planSmartParts(",
+              4,
+              "smart descriptor function",
+          )
+          exporter = indent_block(
+              exporter,
+              "private suspend fun <T> withReadDescriptors(",
+              "\n\n    private fun sourceExtension",
+              4,
+              "descriptor helper",
+          )
+          exporter_path.write_text(exporter)
+
+          engine_path = Path("app/src/main/java/app/clipforge/media/FfmpegMediaEngine.kt")
+          engine = engine_path.read_text()
+          engine = indent_block(
+              engine,
+              "suspend fun concatSmartPartsDescriptors(",
+              "\n\n    private suspend fun concatSmartParts(",
+              4,
+              "smart descriptor concat",
+          )
+          engine = indent_block(
+              engine,
+              "suspend fun concatSegmentsLosslessDescriptors(",
+              "\n\n    suspend fun concatLossless(",
+              4,
+              "lossless descriptor concat",
+          )
+          engine_path.write_text(engine)
+      - name: Verify whitespace
+        run: git diff --check
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.6.0'
+      - run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+      - run: gradle --no-daemon :app:testDebugUnitTest
+      - name: Commit formatted code
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/format-fd-offset-fix.yml
+          git add app/src/main/java/app/clipforge/media/FfmpegMediaEngine.kt \
+                  app/src/main/java/app/clipforge/workflow/MultiCutExporter.kt
+          git commit -m "Format FD isolation changes"
+          git push origin HEAD:fix/fd-offset-isolation
