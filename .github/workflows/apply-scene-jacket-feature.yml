@@ -13,15 +13,27 @@ jobs:
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: feature/scene-markers-preserve-jacket
           fetch-depth: 0
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+        with:
+          cmdline-tools-version: '15859902'
+          packages: platform-tools
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.6.0'
+
+      - name: Install Android SDK
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
 
       - name: Relax one-shot patch uniqueness guard
         run: sed -i 's/if count != 1:/if count < 1:/' .github/scripts/apply-scene-jacket-feature.py
@@ -30,9 +42,7 @@ jobs:
         run: python3 .github/scripts/apply-scene-jacket-feature.py
 
       - name: Validate Android build
-        run: |
-          chmod +x gradlew
-          ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleDebug
+        run: gradle --no-daemon :app:testDebugUnitTest :app:assembleDebug
 
       - name: Commit feature
         run: |
