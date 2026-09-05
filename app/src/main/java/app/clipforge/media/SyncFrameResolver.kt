@@ -67,6 +67,46 @@ class SyncFrameResolver {
         }
     }
 
+    fun syncFrameAtOrBefore(source: File, durationMs: Long, positionMs: Long): Long? {
+        val extractor = MediaExtractor()
+        return try {
+            extractor.setDataSource(source.absolutePath)
+            syncFrameAt(extractor, durationMs, positionMs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
+        } finally {
+            extractor.release()
+        }
+    }
+
+    fun syncFrameAtOrBefore(sourceFd: FileDescriptor, durationMs: Long, positionMs: Long): Long? {
+        val extractor = MediaExtractor()
+        return try {
+            extractor.setDataSource(sourceFd)
+            syncFrameAt(extractor, durationMs, positionMs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
+        } finally {
+            extractor.release()
+        }
+    }
+
+    fun syncFrameAtOrAfter(source: File, durationMs: Long, positionMs: Long): Long? {
+        val extractor = MediaExtractor()
+        return try {
+            extractor.setDataSource(source.absolutePath)
+            syncFrameAt(extractor, durationMs, positionMs, MediaExtractor.SEEK_TO_NEXT_SYNC)
+        } finally {
+            extractor.release()
+        }
+    }
+
+    fun syncFrameAtOrAfter(sourceFd: FileDescriptor, durationMs: Long, positionMs: Long): Long? {
+        val extractor = MediaExtractor()
+        return try {
+            extractor.setDataSource(sourceFd)
+            syncFrameAt(extractor, durationMs, positionMs, MediaExtractor.SEEK_TO_NEXT_SYNC)
+        } finally {
+            extractor.release()
+        }
+    }
+
     private fun snapRange(
         extractor: MediaExtractor,
         durationMs: Long,
@@ -113,6 +153,18 @@ class SyncFrameResolver {
         return seekMs(extractor, probe, mode)
             ?.coerceIn(0L, duration)
             ?.takeIf { target -> if (forward) target > current else target < current }
+    }
+
+    private fun syncFrameAt(
+        extractor: MediaExtractor,
+        durationMs: Long,
+        positionMs: Long,
+        mode: Int,
+    ): Long? {
+        val duration = durationMs.coerceAtLeast(1L)
+        if (!selectVideoTrack(extractor)) return null
+        return seekMs(extractor, positionMs.coerceIn(0L, duration), mode)
+            ?.coerceIn(0L, duration)
     }
 
     private fun selectVideoTrack(extractor: MediaExtractor): Boolean {
