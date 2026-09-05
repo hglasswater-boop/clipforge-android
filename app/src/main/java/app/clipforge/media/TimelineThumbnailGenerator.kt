@@ -52,49 +52,50 @@ class TimelineThumbnailGenerator {
     ): List<File> {
         if (durationMs <= 0L || count <= 0) return emptyList()
         outputDir.mkdirs()
+        val slots = List(count) { index -> File(outputDir, "%02d.jpg".format(index)) }
 
         val retriever = MediaMetadataRetriever()
         try {
             configure(retriever)
-            return buildList {
-                repeat(count) { index ->
-                    try {
-                        val timeMs = if (count == 1) {
-                            durationMs / 2L
-                        } else {
-                            ((durationMs - 1L).coerceAtLeast(0L) * index) / (count - 1L)
-                        }
-                        val frame = runCatching {
-                            retriever.getFrameAtTime(
-                                timeMs * 1_000L,
-                                MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
-                            )
-                        }.getOrNull() ?: return@repeat
+            slots.forEachIndexed { index, target ->
+                try {
+                    val timeMs = if (count == 1) {
+                        durationMs / 2L
+                    } else {
+                        ((durationMs - 1L).coerceAtLeast(0L) * index) / (count - 1L)
+                    }
+                    val frame = runCatching {
+                        retriever.getFrameAtTime(
+                            timeMs * 1_000L,
+                            MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
+                        )
+                    }.getOrNull() ?: return@forEachIndexed
 
+                    try {
+                        val scaled = scaleForTimeline(frame)
                         try {
-                            val scaled = scaleForTimeline(frame)
-                            try {
-                                val target = File(outputDir, "%02d.jpg".format(index))
-                                target.outputStream().buffered().use { output ->
-                                    scaled.compress(Bitmap.CompressFormat.JPEG, 72, output)
-                                }
-                                if (target.length() > 0L) add(target) else target.delete()
-                            } finally {
-                                if (scaled !== frame) scaled.recycle()
+                            val written = target.outputStream().buffered().use { output ->
+                                scaled.compress(Bitmap.CompressFormat.JPEG, 72, output)
                             }
+                            if (!written || target.length() <= 0L) target.delete()
                         } finally {
-                            frame.recycle()
+                            if (scaled !== frame) scaled.recycle()
                         }
                     } finally {
-                        onProgress(index + 1, count)
+                        frame.recycle()
                     }
+                } finally {
+                    onProgress(index + 1, count)
                 }
             }
         } catch (_: Throwable) {
-            return emptyList()
+            slots.forEachIndexed { index, _ -> onProgress(index + 1, count) }
         } finally {
             runCatching { retriever.release() }
         }
+        // Return every time slot, even when an individual JPEG could not be produced. The UI uses
+        // missing files as placeholders so a failed decode cannot visually compress the timeline.
+        return slots
     }
 
     private fun scaleForTimeline(frame: Bitmap): Bitmap {
