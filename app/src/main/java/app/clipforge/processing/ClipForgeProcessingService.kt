@@ -201,6 +201,13 @@ class ClipForgeProcessingService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     private fun updateProgress(title: String, message: String, progressPercent: Int? = null) {
+        if (cancellationRequested) {
+            getSystemService(NotificationManager::class.java).notify(
+                NOTIFICATION_ID,
+                buildNotification("ClipForge", "キャンセルしています", true, null),
+            )
+            return
+        }
         ProcessingStateStore.running(title, message, progressPercent)
         getSystemService(NotificationManager::class.java)
             .notify(NOTIFICATION_ID, buildNotification(title, message, true, progressPercent))
@@ -264,7 +271,7 @@ class ClipForgeProcessingService : Service() {
             builder.setProgress(0, 0, ongoing)
         }
 
-        if (ongoing) {
+        if (ongoing && message != "キャンセルしています") {
             val cancelIntent = Intent(this, ClipForgeProcessingService::class.java)
                 .setAction(ACTION_CANCEL)
             val cancelPending = PendingIntent.getService(
