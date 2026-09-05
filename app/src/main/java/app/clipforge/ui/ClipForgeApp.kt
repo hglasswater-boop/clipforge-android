@@ -343,7 +343,7 @@ private fun TrimEditorScreen(viewModel: MainViewModel, state: MainUiState, edito
                                 },
                                 enabled = !state.busy,
                                 modifier = Modifier.weight(1f),
-                            ) { Text("INへ") }
+                            ) { Text("開始へ") }
                             OutlinedButton(
                                 onClick = {
                                     player.seekTo(editor.startMs)
@@ -361,7 +361,7 @@ private fun TrimEditorScreen(viewModel: MainViewModel, state: MainUiState, edito
                                 },
                                 enabled = !state.busy,
                                 modifier = Modifier.weight(1f),
-                            ) { Text("OUTへ") }
+                            ) { Text("終了へ") }
                         }
                         Button(
                             onClick = viewModel::addCurrentCutRange,
@@ -499,14 +499,14 @@ private fun EditorTransportControls(
                     enabled = enabled,
                     modifier = Modifier.weight(1f),
                 ) {
-                    Text("現在位置を IN")
+                    Text("開始位置に設定")
                 }
                 Button(
                     onClick = onSetOut,
                     enabled = enabled,
                     modifier = Modifier.weight(1f),
                 ) {
-                    Text("現在位置を OUT")
+                    Text("終了位置に設定")
                 }
             }
             Text(
@@ -532,7 +532,7 @@ private fun CutRangeList(
             Text("削除リスト", style = MaterialTheme.typography.titleMedium)
             if (editor.cutRanges.isEmpty()) {
                 Text(
-                    "まだ削除範囲はありません。IN / OUTを決めて追加してください。",
+                    "まだ削除範囲はありません。開始位置と終了位置を決めて追加してください。",
                     style = MaterialTheme.typography.bodySmall,
                 )
             } else {
@@ -766,8 +766,8 @@ private fun TrimRangeControls(viewModel: MainViewModel, player: ExoPlayer, edito
             valueRange = 0f..1f,
         )
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text("IN  ${formatTime(editor.startMs)}")
-            Text("OUT  ${formatTime(editor.endMs)}")
+            Text("開始  ${formatTime(editor.startMs)}")
+            Text("終了  ${formatTime(editor.endMs)}")
         }
         Text(
             "選択範囲 ${formatTime(editor.endMs - editor.startMs)} / 全体 ${formatTime(editor.durationMs)}",
