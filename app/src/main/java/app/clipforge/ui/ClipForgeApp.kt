@@ -6,9 +6,13 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.BitmapFactory
 import android.net.Uri
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -20,10 +24,12 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.matchParentSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.HorizontalDivider
@@ -34,7 +40,9 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RangeSlider
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -48,6 +56,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
@@ -66,6 +77,7 @@ import app.clipforge.MainUiState
 import app.clipforge.MainViewModel
 import app.clipforge.TrimEditorState
 import app.clipforge.media.CutMode
+import app.clipforge.media.MediaSegment
 import app.clipforge.workflow.PickedVideo
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -173,7 +185,7 @@ private fun HomeScreen(
             item {
                 Spacer(Modifier.height(8.dp))
                 Text("ClipForge", style = MaterialTheme.typography.headlineMedium)
-                Text("動画探しはファイラーに任せて、ClipForgeは無劣化の結合・カットだけ担当します。")
+                Text("動画探しはファイラーに任せて、ClipForgeは結合とカットに集中します。")
             }
             if (state.busy) {
                 item { StatusArea(state, viewModel::cancelProcessing) }
@@ -187,9 +199,9 @@ private fun HomeScreen(
                         Text("動画を選択", style = MaterialTheme.typography.titleMedium)
                         Text(
                             if (xFilesAvailable) {
-                                "XFilesを開いてMP4 / MKVを選べます。SMBの接続設定と資格情報はXFiles側だけに残ります。"
+                                "XFilesからMP4 / MKVを選択できます。"
                             } else {
-                                "XFilesの選択モードが見つからないため、Androidのファイル選択画面を開きます。"
+                                "Androidのファイル選択画面からMP4 / MKVを選択します。"
                             },
                             style = MaterialTheme.typography.bodySmall,
                         )
@@ -238,6 +250,7 @@ private fun TrimEditorScreen(viewModel: MainViewModel, state: MainUiState, edito
     var previewSelection by remember(editor.sessionPath) { mutableStateOf(false) }
     var playheadMs by remember(editor.sessionPath) { mutableStateOf(0L) }
     var keyframeNavigationBusy by remember(editor.sessionPath) { mutableStateOf(false) }
+    var showDiscardDialog by remember(editor.sessionPath) { mutableStateOf(false) }
 
     LaunchedEffect(editor.sessionPath) {
         viewModel.loadTrimThumbnails()
@@ -286,7 +299,50 @@ private fun TrimEditorScreen(viewModel: MainViewModel, state: MainUiState, edito
         }
     }
 
-    Scaffold { padding ->
+    fun requestCloseEditor() {
+        if (state.busy) return
+        if (editor.cutRanges.isNotEmpty()) {
+            showDiscardDialog = true
+        } else {
+            viewModel.cancelTrimEditor()
+        }
+    }
+
+    BackHandler {
+        requestCloseEditor()
+    }
+
+    if (showDiscardDialog) {
+        AlertDialog(
+            onDismissRequest = { showDiscardDialog = false },
+            title = { Text("編集内容を破棄しますか？") },
+            text = { Text("追加した削除範囲は保存されません。") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showDiscardDialog = false
+                        viewModel.cancelTrimEditor()
+                    },
+                ) { Text("破棄する") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDiscardDialog = false }) { Text("編集を続ける") }
+            },
+        )
+    }
+
+    Scaffold(
+        bottomBar = {
+            if (!state.busy) {
+                EditorBottomBar(
+                    editingExistingRange = editor.editingCutIndex != null,
+                    canSave = editor.cutRanges.isNotEmpty(),
+                    onCommitRange = viewModel::addCurrentCutRange,
+                    onSave = { viewModel.applyTrim(outputName) },
+                )
+            }
+        },
+    ) { padding ->
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
@@ -296,8 +352,24 @@ private fun TrimEditorScreen(viewModel: MainViewModel, state: MainUiState, edito
         ) {
             item {
                 Spacer(Modifier.height(8.dp))
-                Text("カット編集", style = MaterialTheme.typography.headlineMedium)
-                Text(editor.sourceName, style = MaterialTheme.typography.titleMedium)
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("カット編集", style = MaterialTheme.typography.headlineMedium)
+                        Text(
+                            editor.sourceName,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.titleMedium,
+                        )
+                    }
+                    TextButton(onClick = ::requestCloseEditor, enabled = !state.busy) {
+                        Text("終了")
+                    }
+                }
             }
             if (state.busy) {
                 item { StatusArea(state, viewModel::cancelProcessing) }
@@ -345,7 +417,12 @@ private fun TrimEditorScreen(viewModel: MainViewModel, state: MainUiState, edito
                             enabled = !state.busy,
                             onMode = viewModel::setCutMode,
                         )
-                        TrimRangeControls(viewModel, player, editor)
+                        TrimRangeControls(
+                            viewModel = viewModel,
+                            player = player,
+                            editor = editor,
+                            playheadMs = playheadMs,
+                        )
                         Row(
                             Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -378,12 +455,20 @@ private fun TrimEditorScreen(viewModel: MainViewModel, state: MainUiState, edito
                                 modifier = Modifier.weight(1f),
                             ) { Text("終了へ") }
                         }
-                        Button(
-                            onClick = viewModel::addCurrentCutRange,
-                            enabled = !state.busy,
-                            modifier = Modifier.fillMaxWidth(),
-                        ) {
-                            Text("この範囲を削除リストに追加")
+                        if (editor.editingCutIndex != null) {
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    "#${editor.editingCutIndex + 1} を編集中",
+                                    style = MaterialTheme.typography.labelLarge,
+                                )
+                                TextButton(onClick = viewModel::startNewCutRange) {
+                                    Text("新しい範囲")
+                                }
+                            }
                         }
                     }
                 }
@@ -392,8 +477,18 @@ private fun TrimEditorScreen(viewModel: MainViewModel, state: MainUiState, edito
                 CutRangeList(
                     editor = editor,
                     enabled = !state.busy,
+                    canUndo = state.canUndoEdit,
+                    onSelect = { index ->
+                        val range = editor.cutRanges.getOrNull(index) ?: return@CutRangeList
+                        previewSelection = false
+                        player.pause()
+                        player.seekTo(range.startMs)
+                        playheadMs = range.startMs
+                        viewModel.selectCutRange(index)
+                    },
                     onRemove = viewModel::removeCutRange,
                     onClear = viewModel::clearCutRanges,
+                    onUndo = viewModel::undoEdit,
                 )
             }
             item {
@@ -405,9 +500,9 @@ private fun TrimEditorScreen(viewModel: MainViewModel, state: MainUiState, edito
                         Text("書き出し", style = MaterialTheme.typography.titleMedium)
                         Text(
                             if (editor.cutMode == CutMode.SMART) {
-                                "正確カットで保存します。指定した境界の短い部分だけ再エンコードし、それ以外は無劣化コピーします。"
+                                "正確カット: 指定位置どおり、境界だけ再エンコード"
                             } else {
-                                "完全無劣化で保存します。カット位置はキーフレームに合わせられます。"
+                                "完全無劣化: 再エンコードなし、キーフレーム単位"
                             },
                             style = MaterialTheme.typography.bodySmall,
                         )
@@ -419,36 +514,40 @@ private fun TrimEditorScreen(viewModel: MainViewModel, state: MainUiState, edito
                             placeholder = { Text("空欄なら元ファイル名-cut") },
                             enabled = !state.busy,
                         )
-                        Row(
-                            Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            OutlinedButton(
-                                onClick = viewModel::cancelTrimEditor,
-                                enabled = !state.busy,
-                                modifier = Modifier.weight(1f),
-                            ) {
-                                Text("キャンセル")
-                            }
-                            Button(
-                                onClick = { viewModel.applyTrim(outputName) },
-                                enabled = !state.busy && editor.cutRanges.isNotEmpty(),
-                                modifier = Modifier.weight(1f),
-                            ) {
-                                Text("編集結果を保存")
-                            }
-                        }
                     }
                 }
             }
-            item {
-                Text(
-                    "削除範囲は何箇所でも追加できます。実ファイルへの書き込みは最後の保存時だけ行います。",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
             if (!state.busy) {
                 item { StatusArea(state, viewModel::cancelProcessing) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun EditorBottomBar(
+    editingExistingRange: Boolean,
+    canSave: Boolean,
+    onCommitRange: () -> Unit,
+    onSave: () -> Unit,
+) {
+    Surface(tonalElevation = 6.dp, shadowElevation = 6.dp) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            OutlinedButton(
+                onClick = onCommitRange,
+                modifier = Modifier.weight(1f),
+            ) {
+                Text(if (editingExistingRange) "範囲を更新" else "範囲を追加")
+            }
+            Button(
+                onClick = onSave,
+                enabled = canSave,
+                modifier = Modifier.weight(1f),
+            ) {
+                Text("編集結果を保存")
             }
         }
     }
@@ -541,10 +640,6 @@ private fun EditorTransportControls(
                     Text("終了位置に設定")
                 }
             }
-            Text(
-                "左が戻る、右が進むです。同じ秒数を同じ行に揃えています。キーフレーム移動は完全無劣化位置の確認にも使えます。",
-                style = MaterialTheme.typography.bodySmall,
-            )
         }
     }
 }
@@ -570,7 +665,7 @@ private fun CutModeSelector(
             } else {
                 OutlinedButton(
                     onClick = { onMode(CutMode.SMART) },
-                    enabled = enabled && editor.cutRanges.isEmpty(),
+                    enabled = enabled,
                     modifier = Modifier.weight(1f),
                 ) { Text("正確カット") }
             }
@@ -584,25 +679,19 @@ private fun CutModeSelector(
             } else {
                 OutlinedButton(
                     onClick = { onMode(CutMode.LOSSLESS) },
-                    enabled = enabled && editor.cutRanges.isEmpty(),
+                    enabled = enabled,
                     modifier = Modifier.weight(1f),
                 ) { Text("完全無劣化") }
             }
         }
         Text(
             if (editor.cutMode == CutMode.SMART) {
-                "標準。指定位置は動かしません。H.264 / H.265 はカット境界の短い部分だけ再エンコードします。"
+                "指定位置を維持します。"
             } else {
-                "映像を一切再エンコードしません。その代わり開始・終了位置が近いキーフレームへ移動します。"
+                "登録済み範囲もキーフレームへ合わせます。"
             },
             style = MaterialTheme.typography.bodySmall,
         )
-        if (editor.cutRanges.isNotEmpty()) {
-            Text(
-                "方式を変更する場合は、削除リストをいったんすべて解除してください。",
-                style = MaterialTheme.typography.bodySmall,
-            )
-        }
     }
 }
 
@@ -610,35 +699,49 @@ private fun CutModeSelector(
 private fun CutRangeList(
     editor: TrimEditorState,
     enabled: Boolean,
+    canUndo: Boolean,
+    onSelect: (Int) -> Unit,
     onRemove: (Int) -> Unit,
     onClear: () -> Unit,
+    onUndo: () -> Unit,
 ) {
     Card(Modifier.fillMaxWidth()) {
         Column(
             Modifier.padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Text("削除リスト", style = MaterialTheme.typography.titleMedium)
-            Text(
-                if (editor.cutMode == CutMode.SMART) "方式: 正確カット" else "方式: 完全無劣化",
-                style = MaterialTheme.typography.bodySmall,
-            )
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("削除リスト", style = MaterialTheme.typography.titleMedium)
+                if (canUndo) {
+                    TextButton(onClick = onUndo, enabled = enabled) { Text("元に戻す") }
+                }
+            }
             if (editor.cutRanges.isEmpty()) {
-                Text(
-                    "まだ削除範囲はありません。開始位置と終了位置を決めて追加してください。",
-                    style = MaterialTheme.typography.bodySmall,
-                )
+                Text("削除範囲はありません。", style = MaterialTheme.typography.bodySmall)
             } else {
                 editor.cutRanges.forEachIndexed { index, range ->
+                    val selected = editor.editingCutIndex == index
+                    val rowModifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(
+                            if (selected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent,
+                        )
+                        .clickable(enabled = enabled) { onSelect(index) }
+                        .padding(start = 8.dp)
                     Row(
-                        Modifier.fillMaxWidth(),
+                        rowModifier,
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        Column(Modifier.weight(1f)) {
+                        Column(Modifier.weight(1f).padding(vertical = 8.dp)) {
                             Text("#${index + 1}  ${formatTime(range.startMs)} → ${formatTime(range.endMs)}")
                             Text(
-                                "削除 ${formatTime(range.durationMs)}",
+                                if (selected) "編集中 / 削除 ${formatTime(range.durationMs)}" else "削除 ${formatTime(range.durationMs)}",
                                 style = MaterialTheme.typography.bodySmall,
                             )
                         }
@@ -653,7 +756,7 @@ private fun CutRangeList(
                 }
                 HorizontalDivider()
                 Text(
-                    "${editor.cutRanges.size}箇所 / 削除合計 ${formatTime(editor.removedDurationMs)} / 完成予定 ${formatTime(editor.resultDurationMs)}",
+                    "${editor.cutRanges.size}箇所 / 削除 ${formatTime(editor.removedDurationMs)} / 完成 ${formatTime(editor.resultDurationMs)}",
                     style = MaterialTheme.typography.bodyMedium,
                 )
                 OutlinedButton(
@@ -661,7 +764,7 @@ private fun CutRangeList(
                     enabled = enabled,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Text("削除リストをすべて解除")
+                    Text("すべて解除")
                 }
             }
         }
@@ -696,10 +799,6 @@ private fun EditCard(
                     Button(onClick = onOpenTrim, enabled = enabled) {
                         Text("カット編集を開く")
                     }
-                    Text(
-                        "動画を見ながら何箇所でも削除範囲を追加し、最後にまとめて保存できます。",
-                        style = MaterialTheme.typography.bodySmall,
-                    )
                 }
                 selectedVideos.size >= 2 -> {
                     Text("結合キュー", style = MaterialTheme.typography.titleSmall)
@@ -715,18 +814,12 @@ private fun EditCard(
                             )
                         }
                     }
-                    Text(
-                        "右端の ≡ をつかんで上下にドラッグすると結合順を変更できます。",
-                        style = MaterialTheme.typography.bodySmall,
-                    )
                     OutlinedTextField(
                         value = outputName,
                         onValueChange = onOutputName,
                         modifier = Modifier.fillMaxWidth(),
                         label = { Text("出力ファイル名 (.mp4 / .mkv)") },
-                        supportingText = {
-                            Text("先頭ファイル名 + _concat を初期値にします")
-                        },
+                        supportingText = { Text("先頭ファイル名 + _concat") },
                         enabled = enabled,
                     )
                     Button(onClick = onConcat, enabled = enabled) {
@@ -734,10 +827,6 @@ private fun EditCard(
                     }
                 }
             }
-            Text(
-                "処理後はXFilesへ戻り、保存先フォルダを選びます。原本は直接書き換えません。",
-                style = MaterialTheme.typography.bodySmall,
-            )
         }
     }
 }
@@ -836,7 +925,12 @@ private fun compactDisplayName(name: String): String {
 }
 
 @Composable
-private fun TrimRangeControls(viewModel: MainViewModel, player: ExoPlayer, editor: TrimEditorState) {
+private fun TrimRangeControls(
+    viewModel: MainViewModel,
+    player: ExoPlayer,
+    editor: TrimEditorState,
+    playheadMs: Long,
+) {
     val duration = editor.durationMs.coerceAtLeast(1L)
     val startFraction = (editor.startMs.toDouble() / duration).toFloat().coerceIn(0f, 1f)
     val endFraction = (editor.endMs.toDouble() / duration).toFloat().coerceIn(0f, 1f)
@@ -845,17 +939,19 @@ private fun TrimRangeControls(viewModel: MainViewModel, player: ExoPlayer, edito
         TimelineThumbnailStrip(
             paths = editor.thumbnailPaths,
             durationMs = duration,
+            playheadMs = playheadMs,
+            selectionStartMs = editor.startMs,
+            selectionEndMs = editor.endMs,
+            cutRanges = editor.cutRanges,
             onSeek = { targetMs ->
                 player.pause()
                 player.seekTo(targetMs)
             },
         )
-        if (editor.thumbnailPaths.isNotEmpty()) {
-            Text(
-                "サムネイルをタップすると、その位置へ移動します。",
-                style = MaterialTheme.typography.bodySmall,
-            )
-        }
+        Text(
+            "削除範囲は塗りつぶし、選択範囲は両端線、現在位置は中央線で表示します。",
+            style = MaterialTheme.typography.bodySmall,
+        )
         RangeSlider(
             value = startFraction..endFraction,
             onValueChange = { range ->
@@ -872,11 +968,11 @@ private fun TrimRangeControls(viewModel: MainViewModel, player: ExoPlayer, edito
             valueRange = 0f..1f,
         )
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text("開始  ${formatTime(editor.startMs)}")
-            Text("終了  ${formatTime(editor.endMs)}")
+            Text("開始 ${formatTime(editor.startMs)}")
+            Text("終了 ${formatTime(editor.endMs)}")
         }
         Text(
-            "選択範囲 ${formatTime(editor.endMs - editor.startMs)} / 全体 ${formatTime(editor.durationMs)}",
+            "選択 ${formatTime(editor.endMs - editor.startMs)} / 全体 ${formatTime(editor.durationMs)}",
             style = MaterialTheme.typography.bodySmall,
         )
     }
@@ -886,14 +982,24 @@ private fun TrimRangeControls(viewModel: MainViewModel, player: ExoPlayer, edito
 private fun TimelineThumbnailStrip(
     paths: List<String>,
     durationMs: Long,
+    playheadMs: Long,
+    selectionStartMs: Long,
+    selectionEndMs: Long,
+    cutRanges: List<MediaSegment>,
     onSeek: (Long) -> Unit,
 ) {
-    if (paths.isEmpty()) return
-    Row(
+    val slots = if (paths.isEmpty()) List(8) { "" } else paths
+    val placeholder = MaterialTheme.colorScheme.surfaceVariant
+    val cutColor = MaterialTheme.colorScheme.error.copy(alpha = 0.34f)
+    val selectionColor = MaterialTheme.colorScheme.primary
+    val playheadColor = MaterialTheme.colorScheme.onSurface
+
+    Box(
         modifier = Modifier
             .fillMaxWidth()
-            .height(68.dp)
+            .height(76.dp)
             .clip(RoundedCornerShape(8.dp))
+            .background(placeholder)
             .pointerInput(durationMs) {
                 detectTapGestures { offset ->
                     val width = size.width.toFloat().coerceAtLeast(1f)
@@ -904,18 +1010,68 @@ private fun TimelineThumbnailStrip(
                     onSeek(targetMs)
                 }
             },
-        horizontalArrangement = Arrangement.spacedBy(1.dp),
     ) {
-        paths.forEach { path ->
-            val image = remember(path) { BitmapFactory.decodeFile(path)?.asImageBitmap() }
-            if (image != null) {
-                Image(
-                    bitmap = image,
-                    contentDescription = null,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.weight(1f).fillMaxHeight(),
+        Row(
+            modifier = Modifier.matchParentSize(),
+            horizontalArrangement = Arrangement.spacedBy(1.dp),
+        ) {
+            slots.forEach { path ->
+                val image = remember(path) {
+                    path.takeIf { it.isNotBlank() }?.let(BitmapFactory::decodeFile)?.asImageBitmap()
+                }
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight()
+                        .background(placeholder),
+                ) {
+                    if (image != null) {
+                        Image(
+                            bitmap = image,
+                            contentDescription = null,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                    }
+                }
+            }
+        }
+        Canvas(Modifier.matchParentSize()) {
+            fun xFor(ms: Long): Float =
+                (size.width * (ms.coerceIn(0L, durationMs).toDouble() / durationMs.toDouble())).toFloat()
+
+            cutRanges.forEach { range ->
+                val left = xFor(range.startMs)
+                val right = xFor(range.endMs)
+                drawRect(
+                    color = cutColor,
+                    topLeft = Offset(left, 0f),
+                    size = Size((right - left).coerceAtLeast(1f), size.height),
                 )
             }
+
+            val startX = xFor(selectionStartMs)
+            val endX = xFor(selectionEndMs)
+            drawLine(
+                color = selectionColor,
+                start = Offset(startX, 0f),
+                end = Offset(startX, size.height),
+                strokeWidth = 4f,
+            )
+            drawLine(
+                color = selectionColor,
+                start = Offset(endX, 0f),
+                end = Offset(endX, size.height),
+                strokeWidth = 4f,
+            )
+
+            val playheadX = xFor(playheadMs)
+            drawLine(
+                color = playheadColor,
+                start = Offset(playheadX, 0f),
+                end = Offset(playheadX, size.height),
+                strokeWidth = 2f,
+            )
         }
     }
 }
