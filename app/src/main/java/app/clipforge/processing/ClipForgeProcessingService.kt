@@ -11,6 +11,7 @@ import android.net.Uri
 import android.os.IBinder
 import android.os.PowerManager
 import app.clipforge.MainActivity
+import app.clipforge.media.CutMode
 import app.clipforge.media.FfmpegMediaEngine
 import app.clipforge.media.MediaSegment
 import app.clipforge.workflow.ExternalEditPipeline
@@ -160,6 +161,9 @@ class ClipForgeProcessingService : Service() {
         val durationMs = request.getLongExtra(EXTRA_DURATION_MS, -1L)
         val starts = request.getLongArrayExtra(EXTRA_CUT_STARTS) ?: longArrayOf()
         val ends = request.getLongArrayExtra(EXTRA_CUT_ENDS) ?: longArrayOf()
+        val cutMode = request.getStringExtra(EXTRA_CUT_MODE)
+            ?.let { value -> runCatching { CutMode.valueOf(value) }.getOrNull() }
+            ?: CutMode.SMART
         require(durationMs > 0L) { "動画の長さが不正です" }
         require(starts.isNotEmpty() && starts.size == ends.size) { "削除する範囲がありません" }
         val cutRanges = starts.indices.map { index -> MediaSegment(starts[index], ends[index]) }
@@ -170,6 +174,7 @@ class ClipForgeProcessingService : Service() {
             sessionPath = sessionPath,
             durationMs = durationMs,
             cutRanges = cutRanges,
+            cutMode = cutMode,
             outputUri = outputUri,
             outputName = outputName,
         ) { message, percent -> updateProgress(title, message, percent) }
@@ -347,6 +352,7 @@ class ClipForgeProcessingService : Service() {
         private const val EXTRA_DURATION_MS = "durationMs"
         private const val EXTRA_CUT_STARTS = "cutStarts"
         private const val EXTRA_CUT_ENDS = "cutEnds"
+        private const val EXTRA_CUT_MODE = "cutMode"
 
         fun startPrepareCut(context: Context, source: PickedVideo) {
             val intent = Intent(context, ClipForgeProcessingService::class.java)
@@ -379,6 +385,7 @@ class ClipForgeProcessingService : Service() {
             outputName: String,
             durationMs: Long,
             cutRanges: List<MediaSegment>,
+            cutMode: CutMode,
         ) {
             require(cutRanges.isNotEmpty()) { "削除する範囲がありません" }
             val intent = Intent(context, ClipForgeProcessingService::class.java)
@@ -390,6 +397,7 @@ class ClipForgeProcessingService : Service() {
                 .putExtra(EXTRA_DURATION_MS, durationMs)
                 .putExtra(EXTRA_CUT_STARTS, cutRanges.map(MediaSegment::startMs).toLongArray())
                 .putExtra(EXTRA_CUT_ENDS, cutRanges.map(MediaSegment::endMs).toLongArray())
+                .putExtra(EXTRA_CUT_MODE, cutMode.name)
             localInputPath?.let { intent.putExtra(EXTRA_LOCAL_INPUT, it) }
             context.startForegroundService(intent)
         }
