@@ -6,9 +6,13 @@ import android.provider.OpenableColumns
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import app.clipforge.media.FfmpegMediaEngine
+import app.clipforge.media.MediaSegment
+import app.clipforge.media.normalizeCutRanges
+import app.clipforge.media.remainingSegments
 import app.clipforge.processing.ClipForgeProcessingService
 import app.clipforge.processing.ProcessingState
 import app.clipforge.processing.ProcessingStateStore
+import app.clipforge.workflow.CutSessionNavigator
 import app.clipforge.workflow.ExternalEditPipeline
 import app.clipforge.workflow.PickedVideo
 import kotlinx.coroutines.Dispatchers
@@ -46,7 +50,14 @@ data class TrimEditorState(
     val startMs: Long,
     val endMs: Long,
     val thumbnailPaths: List<String>,
-)
+    val cutRanges: List<MediaSegment> = emptyList(),
+) {
+    val removedDurationMs: Long
+        get() = cutRanges.sumOf(MediaSegment::durationMs)
+
+    val resultDurationMs: Long
+        get() = (durationMs - removedDurationMs).coerceAtLeast(0L)
+}
 
 data class PendingOutput(
     val localPath: String,
@@ -83,6 +94,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         context = application,
         mediaEngine = FfmpegMediaEngine(),
     )
+    private val navigator = CutSessionNavigator(application)
     private val _uiState = MutableStateFlow(MainUiState())
     val uiState = _uiState.asStateFlow()
     private var thumbnailJob: Job? = null
@@ -122,9 +134,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 startMs = 0L,
                                 endMs = processing.durationMs,
                                 thumbnailPaths = processing.thumbnailPaths,
+                                cutRanges = emptyList(),
                             ),
                             pendingDestination = null,
-                            status = "範囲を選択してください",
+                            status = "再生位置を使って削除範囲を追加してください",
                             error = null,
                         )
                     }
@@ -234,6 +247,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun requestCutDestination(outputName: String) {
         val editor = _uiState.value.trimEditor ?: return
+        if (editor.cutRanges.isEmpty()) {
+            showError("削除する範囲を1箇所以上追加してください")
+            return
+        }
         val name = validatedOutputName(outputName, suggestedCutName(editor.sourceName)) ?: return
         requestDestination(PendingDestinationKind.CUT, name)
     }
@@ -292,6 +309,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 PendingDestinationKind.CUT -> {
                     val editor = requireNotNull(state.trimEditor) { "カット編集情報がありません" }
+                    require(editor.cutRanges.isNotEmpty()) { "削除する範囲がありません" }
                     val source = sourceFor(editor, state)
                     ClipForgeProcessingService.startCut(
                         context = app,
@@ -300,8 +318,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         localInputPath = editor.localPath,
                         outputUri = outputUri,
                         outputName = pending.outputName,
-                        startMs = editor.startMs,
-                        endMs = editor.endMs,
+                        durationMs = editor.durationMs,
+                        cutRanges = editor.cutRanges,
                     )
                 }
             }
@@ -408,6 +426,48 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return updated
     }
 
+    fun setTrimStartAt(positionMs: Long) {
+        val editor = _uiState.value.trimEditor ?: return
+        val duration = editor.durationMs.coerceAtLeast(1L)
+        val position = positionMs.coerceIn(0L, duration - 1L)
+        val updated = if (position < editor.endMs) {
+            editor.copy(startMs = position)
+        } else {
+            editor.copy(startMs = position, endMs = duration)
+        }
+        _uiState.update {
+            it.copy(trimEditor = updated, status = "INを設定しました", error = null)
+        }
+    }
+
+    fun setTrimEndAt(positionMs: Long) {
+        val editor = _uiState.value.trimEditor ?: return
+        val duration = editor.durationMs.coerceAtLeast(1L)
+        val position = positionMs.coerceIn(1L, duration)
+        val updated = if (position > editor.startMs) {
+            editor.copy(endMs = position)
+        } else {
+            editor.copy(startMs = 0L, endMs = position)
+        }
+        _uiState.update {
+            it.copy(trimEditor = updated, status = "OUTを設定しました", error = null)
+        }
+    }
+
+    suspend fun adjacentKeyframe(positionMs: Long, forward: Boolean): Long? {
+        val state = _uiState.value
+        val editor = state.trimEditor ?: return null
+        return runCatching {
+            navigator.adjacentKeyframe(
+                source = sourceFor(editor, state),
+                localInputPath = editor.localPath,
+                durationMs = editor.durationMs,
+                positionMs = positionMs,
+                forward = forward,
+            )
+        }.getOrNull()
+    }
+
     fun snapTrimRangeToKeyframes() {
         val editor = _uiState.value.trimEditor ?: return
         val requestedStart = editor.startMs
@@ -439,6 +499,87 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
             }
+        }
+    }
+
+    fun addCurrentCutRange() {
+        val editor = _uiState.value.trimEditor ?: return
+        if (_uiState.value.busy) return
+        val requestedStart = editor.startMs
+        val requestedEnd = editor.endMs
+        val source = sourceFor(editor, _uiState.value)
+
+        viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    busy = true,
+                    progressPercent = null,
+                    status = "削除位置をキーフレームに合わせています",
+                    error = null,
+                )
+            }
+            try {
+                val snapped = pipeline.snapCutRange(
+                    source = source,
+                    localInputPath = editor.localPath,
+                    durationMs = editor.durationMs,
+                    requestedStartMs = requestedStart,
+                    requestedEndMs = requestedEnd,
+                )
+                val candidate = MediaSegment(snapped.first, snapped.last)
+                val normalized = normalizeCutRanges(editor.durationMs, editor.cutRanges + candidate)
+                require(remainingSegments(editor.durationMs, normalized).isNotEmpty()) {
+                    "動画全体を削除する範囲は追加できません"
+                }
+                _uiState.update { state ->
+                    val current = state.trimEditor ?: return@update state
+                    if (current.sessionPath != editor.sessionPath) return@update state
+                    state.copy(
+                        trimEditor = current.copy(
+                            startMs = candidate.startMs,
+                            endMs = candidate.endMs,
+                            cutRanges = normalized,
+                        ),
+                        status = "削除範囲を追加しました（${normalized.size}箇所）",
+                        error = null,
+                    )
+                }
+            } catch (error: Throwable) {
+                _uiState.update {
+                    it.copy(
+                        status = "削除範囲を追加できませんでした",
+                        error = error.message ?: error.javaClass.simpleName,
+                    )
+                }
+            } finally {
+                _uiState.update { it.copy(busy = false, progressPercent = null) }
+            }
+        }
+    }
+
+    fun removeCutRange(index: Int) {
+        if (_uiState.value.busy) return
+        _uiState.update { state ->
+            val editor = state.trimEditor ?: return@update state
+            if (index !in editor.cutRanges.indices) return@update state
+            val next = editor.cutRanges.toMutableList().apply { removeAt(index) }
+            state.copy(
+                trimEditor = editor.copy(cutRanges = next),
+                status = if (next.isEmpty()) "削除範囲はありません" else "削除範囲: ${next.size}箇所",
+                error = null,
+            )
+        }
+    }
+
+    fun clearCutRanges() {
+        if (_uiState.value.busy) return
+        _uiState.update { state ->
+            val editor = state.trimEditor ?: return@update state
+            state.copy(
+                trimEditor = editor.copy(cutRanges = emptyList()),
+                status = "削除範囲をすべて解除しました",
+                error = null,
+            )
         }
     }
 

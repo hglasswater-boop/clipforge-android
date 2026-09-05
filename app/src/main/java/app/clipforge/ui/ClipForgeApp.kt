@@ -41,6 +41,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -65,6 +66,7 @@ import app.clipforge.MainViewModel
 import app.clipforge.TrimEditorState
 import app.clipforge.workflow.PickedVideo
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.io.File
 import java.util.Locale
 import kotlin.math.abs
@@ -215,6 +217,7 @@ private fun HomeScreen(
 @Composable
 private fun TrimEditorScreen(viewModel: MainViewModel, state: MainUiState, editor: TrimEditorState) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val player = remember(editor.sourceUri, editor.localPath) {
         val mediaUri = editor.localPath
             ?.let { Uri.fromFile(File(it)) }
@@ -226,9 +229,18 @@ private fun TrimEditorScreen(viewModel: MainViewModel, state: MainUiState, edito
     }
     var outputName by remember(editor.sourceUri) { mutableStateOf("") }
     var previewSelection by remember(editor.sessionPath) { mutableStateOf(false) }
+    var playheadMs by remember(editor.sessionPath) { mutableStateOf(0L) }
+    var keyframeNavigationBusy by remember(editor.sessionPath) { mutableStateOf(false) }
 
     LaunchedEffect(editor.sessionPath) {
         viewModel.loadTrimThumbnails()
+    }
+
+    LaunchedEffect(player, editor.durationMs) {
+        while (true) {
+            playheadMs = player.currentPosition.coerceIn(0L, editor.durationMs)
+            delay(100)
+        }
     }
 
     DisposableEffect(player) {
@@ -243,6 +255,27 @@ private fun TrimEditorScreen(viewModel: MainViewModel, state: MainUiState, edito
                 break
             }
             delay(50)
+        }
+    }
+
+    fun seekBy(deltaMs: Long) {
+        player.seekTo((player.currentPosition + deltaMs).coerceIn(0L, editor.durationMs))
+    }
+
+    fun jumpKeyframe(forward: Boolean) {
+        if (keyframeNavigationBusy) return
+        keyframeNavigationBusy = true
+        scope.launch {
+            try {
+                val target = viewModel.adjacentKeyframe(player.currentPosition, forward)
+                if (target != null) {
+                    player.pause()
+                    player.seekTo(target)
+                    playheadMs = target
+                }
+            } finally {
+                keyframeNavigationBusy = false
+            }
         }
     }
 
@@ -271,62 +304,273 @@ private fun TrimEditorScreen(viewModel: MainViewModel, state: MainUiState, edito
                     modifier = Modifier.fillMaxWidth().height(240.dp),
                 )
             }
-            item { TrimRangeControls(viewModel, player, editor) }
             item {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(
-                        onClick = {
-                            previewSelection = false
-                            player.pause()
-                            player.seekTo(editor.startMs)
-                        },
-                        enabled = !state.busy,
-                    ) { Text("INへ") }
-                    Button(
-                        onClick = {
-                            player.seekTo(editor.startMs)
-                            player.play()
-                            previewSelection = true
-                        },
-                        enabled = !state.busy,
-                    ) { Text("選択範囲を再生") }
-                    OutlinedButton(
-                        onClick = {
-                            previewSelection = false
-                            player.pause()
-                            player.seekTo(editor.endMs.coerceAtMost(editor.durationMs))
-                        },
-                        enabled = !state.busy,
-                    ) { Text("OUTへ") }
-                }
-            }
-            item {
-                OutlinedTextField(
-                    value = outputName,
-                    onValueChange = { outputName = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    label = { Text("出力ファイル名 (.mp4 / .mkv)") },
-                    placeholder = { Text("空欄なら元ファイル名-cut") },
+                EditorTransportControls(
+                    playheadMs = playheadMs,
+                    durationMs = editor.durationMs,
                     enabled = !state.busy,
+                    keyframeNavigationBusy = keyframeNavigationBusy,
+                    onSeekBy = ::seekBy,
+                    onPreviousKeyframe = { jumpKeyframe(false) },
+                    onNextKeyframe = { jumpKeyframe(true) },
+                    onSetIn = {
+                        player.pause()
+                        viewModel.setTrimStartAt(player.currentPosition)
+                    },
+                    onSetOut = {
+                        player.pause()
+                        viewModel.setTrimEndAt(player.currentPosition)
+                    },
                 )
             }
             item {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = viewModel::cancelTrimEditor, enabled = !state.busy) {
-                        Text("キャンセル")
+                Card(Modifier.fillMaxWidth()) {
+                    Column(
+                        Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text("削除する範囲", style = MaterialTheme.typography.titleMedium)
+                        TrimRangeControls(viewModel, player, editor)
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            OutlinedButton(
+                                onClick = {
+                                    previewSelection = false
+                                    player.pause()
+                                    player.seekTo(editor.startMs)
+                                },
+                                enabled = !state.busy,
+                                modifier = Modifier.weight(1f),
+                            ) { Text("INへ") }
+                            OutlinedButton(
+                                onClick = {
+                                    player.seekTo(editor.startMs)
+                                    player.play()
+                                    previewSelection = true
+                                },
+                                enabled = !state.busy,
+                                modifier = Modifier.weight(1f),
+                            ) { Text("範囲再生") }
+                            OutlinedButton(
+                                onClick = {
+                                    previewSelection = false
+                                    player.pause()
+                                    player.seekTo(editor.endMs.coerceAtMost(editor.durationMs))
+                                },
+                                enabled = !state.busy,
+                                modifier = Modifier.weight(1f),
+                            ) { Text("OUTへ") }
+                        }
+                        Button(
+                            onClick = viewModel::addCurrentCutRange,
+                            enabled = !state.busy,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text("この範囲を削除リストに追加")
+                        }
                     }
-                    Button(onClick = { viewModel.applyTrim(outputName) }, enabled = !state.busy) {
-                        Text("この範囲で無劣化カット")
+                }
+            }
+            item {
+                CutRangeList(
+                    editor = editor,
+                    enabled = !state.busy,
+                    onRemove = viewModel::removeCutRange,
+                    onClear = viewModel::clearCutRanges,
+                )
+            }
+            item {
+                Card(Modifier.fillMaxWidth()) {
+                    Column(
+                        Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text("書き出し", style = MaterialTheme.typography.titleMedium)
+                        OutlinedTextField(
+                            value = outputName,
+                            onValueChange = { outputName = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            label = { Text("出力ファイル名 (.mp4 / .mkv)") },
+                            placeholder = { Text("空欄なら元ファイル名-cut") },
+                            enabled = !state.busy,
+                        )
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            OutlinedButton(
+                                onClick = viewModel::cancelTrimEditor,
+                                enabled = !state.busy,
+                                modifier = Modifier.weight(1f),
+                            ) {
+                                Text("キャンセル")
+                            }
+                            Button(
+                                onClick = { viewModel.applyTrim(outputName) },
+                                enabled = !state.busy && editor.cutRanges.isNotEmpty(),
+                                modifier = Modifier.weight(1f),
+                            ) {
+                                Text("編集結果を保存")
+                            }
+                        }
                     }
                 }
             }
             item {
                 Text(
-                    "編集画面を先に開き、タイムライン画像は後から読み込みます。ハンドルを離した位置だけキーフレームを確認するため、大容量ファイル全体を走査しません。",
+                    "削除範囲は何箇所でも追加できます。実ファイルへの書き込みは最後の保存時だけ行います。",
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
             item { StatusArea(state) }
+        }
+    }
+}
+
+@Composable
+private fun EditorTransportControls(
+    playheadMs: Long,
+    durationMs: Long,
+    enabled: Boolean,
+    keyframeNavigationBusy: Boolean,
+    onSeekBy: (Long) -> Unit,
+    onPreviousKeyframe: () -> Unit,
+    onNextKeyframe: () -> Unit,
+    onSetIn: () -> Unit,
+    onSetOut: () -> Unit,
+) {
+    Card(Modifier.fillMaxWidth()) {
+        Column(
+            Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("現在位置", style = MaterialTheme.typography.labelLarge)
+                Text(
+                    "${formatTime(playheadMs)} / ${formatTime(durationMs)}",
+                    style = MaterialTheme.typography.titleMedium,
+                )
+            }
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                listOf(-10L, -5L, -1L, 1L, 5L, 10L).forEach { seconds ->
+                    OutlinedButton(
+                        onClick = { onSeekBy(seconds * 1_000L) },
+                        enabled = enabled,
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text(if (seconds > 0) "+$seconds" else "$seconds")
+                    }
+                }
+            }
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                OutlinedButton(
+                    onClick = onPreviousKeyframe,
+                    enabled = enabled && !keyframeNavigationBusy,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("◀ 前K")
+                }
+                OutlinedButton(
+                    onClick = onNextKeyframe,
+                    enabled = enabled && !keyframeNavigationBusy,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("次K ▶")
+                }
+            }
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Button(
+                    onClick = onSetIn,
+                    enabled = enabled,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("現在位置を IN")
+                }
+                Button(
+                    onClick = onSetOut,
+                    enabled = enabled,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("現在位置を OUT")
+                }
+            }
+            Text(
+                "±1 / 5 / 10 は秒移動、前K / 次K は前後のキーフレームへ移動します。",
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+    }
+}
+
+@Composable
+private fun CutRangeList(
+    editor: TrimEditorState,
+    enabled: Boolean,
+    onRemove: (Int) -> Unit,
+    onClear: () -> Unit,
+) {
+    Card(Modifier.fillMaxWidth()) {
+        Column(
+            Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text("削除リスト", style = MaterialTheme.typography.titleMedium)
+            if (editor.cutRanges.isEmpty()) {
+                Text(
+                    "まだ削除範囲はありません。IN / OUTを決めて追加してください。",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            } else {
+                editor.cutRanges.forEachIndexed { index, range ->
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text("#${index + 1}  ${formatTime(range.startMs)} → ${formatTime(range.endMs)}")
+                            Text(
+                                "削除 ${formatTime(range.durationMs)}",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                        IconButton(
+                            onClick = { onRemove(index) },
+                            enabled = enabled,
+                        ) {
+                            Text("×", style = MaterialTheme.typography.titleLarge)
+                        }
+                    }
+                    if (index < editor.cutRanges.lastIndex) HorizontalDivider()
+                }
+                HorizontalDivider()
+                Text(
+                    "${editor.cutRanges.size}箇所 / 削除合計 ${formatTime(editor.removedDurationMs)} / 完成予定 ${formatTime(editor.resultDurationMs)}",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                OutlinedButton(
+                    onClick = onClear,
+                    enabled = enabled,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("削除リストをすべて解除")
+                }
+            }
         }
     }
 }
@@ -357,10 +601,10 @@ private fun EditCard(
                         onRemove = onRemoveSelected,
                     )
                     Button(onClick = onOpenTrim, enabled = enabled) {
-                        Text("プレビューしてカット範囲を選ぶ")
+                        Text("カット編集を開く")
                     }
                     Text(
-                        "秒数入力は不要です。動画を見ながら左右のハンドルで範囲を決めます。",
+                        "動画を見ながら何箇所でも削除範囲を追加し、最後にまとめて保存できます。",
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }
