@@ -89,7 +89,8 @@ class TimelineThumbnailGenerator {
                 }
             }
         } catch (_: Throwable) {
-            slots.forEachIndexed { index, _ -> onProgress(index + 1, count) }
+            // A source-level retriever failure leaves every missing slot as a UI placeholder.
+            // Per-slot progress has already been reported for any attempted frames.
         } finally {
             runCatching { retriever.release() }
         }
