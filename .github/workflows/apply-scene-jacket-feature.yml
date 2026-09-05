@@ -41,6 +41,44 @@ jobs:
       - name: Apply feature patch
         run: python3 .github/scripts/apply-scene-jacket-feature.py
 
+      - name: Fix generated patch edge cases
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          ui = Path("app/src/main/java/app/clipforge/ui/ClipForgeApp.kt")
+          source = ui.read_text()
+          source = source.replace(
+              "@Composable\n@Composable\nprivate fun CutModeSelector(",
+              "@Composable\nprivate fun CutModeSelector(",
+          )
+          ui.write_text(source)
+
+          exporter = Path("app/src/main/java/app/clipforge/workflow/MultiCutExporter.kt")
+          source = exporter.read_text()
+          old = """        if (reencodeCount == 0) {
+              exportLosslessDescriptor(source, keepSegments, outputFd, outputName, workDir) { percent ->
+          """
+          new = """        if (reencodeCount == 0) {
+              exportLosslessDescriptor(
+                  source = source,
+                  sourceSignature = sourceSignature,
+                  keepSegments = keepSegments,
+                  outputFd = outputFd,
+                  outputName = outputName,
+                  workDir = workDir,
+              ) { percent ->
+          """
+          if old not in source:
+              raise SystemExit("smart lossless fallback call not found")
+          exporter.write_text(source.replace(old, new, 1))
+
+          detector = Path("app/src/main/java/app/clipforge/media/SceneChangeDetector.kt")
+          source = detector.read_text()
+          source = source.replace("scene\\\\\\\\,0.35", "scene\\\\,0.35")
+          detector.write_text(source)
+          PY
+
       - name: Validate Android build
         run: gradle --no-daemon :app:testDebugUnitTest :app:assembleDebug
 
