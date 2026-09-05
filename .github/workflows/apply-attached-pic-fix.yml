@@ -1,0 +1,194 @@
+name: Apply smart cut cover art fix
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - .github/workflows/apply-attached-pic-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        with:
+          cmdline-tools-version: '15859902'
+          packages: platform-tools
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.6.0'
+      - run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+      - name: Apply attached-picture handling fix
+        shell: python
+        run: |
+          from pathlib import Path
+
+          def replace_once(text: str, old: str, new: str, label: str) -> str:
+              count = text.count(old)
+              if count != 1:
+                  raise RuntimeError(f"{label}: expected exactly one match, found {count}")
+              return text.replace(old, new, 1)
+
+          models_path = Path("app/src/main/java/app/clipforge/media/MediaModels.kt")
+          models = models_path.read_text()
+          models = replace_once(
+              models,
+              '''    val channels: Int?,
+              val timeBase: String?
+          )''',
+              '''    val channels: Int?,
+              val timeBase: String?,
+              val attachedPic: Boolean = false,
+          )''',
+              "StreamSignature attachedPic field",
+          )
+          models_path.write_text(models)
+
+          engine_path = Path("app/src/main/java/app/clipforge/media/FfmpegMediaEngine.kt")
+          engine = engine_path.read_text()
+          engine = replace_once(
+              engine,
+              '"-show_entries", "format=format_name,duration:stream=codec_type,codec_name,codec_tag_string,width,height,sample_rate,channels,time_base",',
+              '"-show_entries", "format=format_name,duration:stream=codec_type,codec_name,codec_tag_string,width,height,sample_rate,channels,time_base:stream_disposition=attached_pic",',
+              "ffprobe disposition selection",
+          )
+          engine = replace_once(
+              engine,
+              '''                            channels = stream.optInt("channels").takeIf { stream.has("channels") },
+                                      timeBase = stream.optString("time_base").takeIf { it.isNotBlank() },''',
+              '''                            channels = stream.optInt("channels").takeIf { stream.has("channels") },
+                                      timeBase = stream.optString("time_base").takeIf { it.isNotBlank() },
+                                      attachedPic = stream.optJSONObject("disposition")
+                                          ?.optInt("attached_pic", 0) == 1,''',
+              "ffprobe disposition parsing",
+          )
+          engine = replace_once(
+              engine,
+              '''private fun formatDimensions(stream: StreamSignature): String =
+              if (stream.width != null && stream.height != null) {
+                  "${stream.width}x${stream.height}"
+              } else {
+                  "不明"
+              }
+          ''',
+              '''private fun formatDimensions(stream: StreamSignature): String =
+              if (stream.width != null && stream.height != null) {
+                  "${stream.width}x${stream.height}"
+              } else {
+                  "不明"
+              }
+          
+          internal fun MediaSignature.playbackVideoStreams(): List<StreamSignature> =
+              streams.filter { it.type == "video" && !it.attachedPic }
+          ''',
+              "playback video helper",
+          )
+          engine = replace_once(
+              engine,
+              '"-select_streams", "v:0",',
+              '"-select_streams", "V:0",',
+              "keyframe stream selection",
+          )
+          engine = replace_once(
+              engine,
+              'val videoStreams = sourceSignature.streams.filter { it.type == "video" }',
+              'val videoStreams = sourceSignature.playbackVideoStreams()',
+              "smart cut video filtering",
+          )
+          engine = replace_once(engine, '"-c:v:0", encoder,', '"-c:V:0", encoder,', "video encoder stream specifier")
+          engine = replace_once(engine, '"-b:v:0", smartBoundaryBitrate(video, video.codec).toString(),', '"-b:V:0", smartBoundaryBitrate(video, video.codec).toString(),', "video bitrate stream specifier")
+          engine = replace_once(engine, 'args += listOf("-pix_fmt", "yuv420p")', 'args += listOf("-pix_fmt:V:0", "yuv420p")', "pixel format stream specifier")
+          engine = replace_once(engine, '?.let { args += listOf("-tag:v:0", it) }', '?.let { args += listOf("-tag:V:0", it) }', "codec tag stream specifier")
+          engine = replace_once(
+              engine,
+              '''        args += inputArguments
+                  args += listOf(
+                      "-t", seconds(segment.durationMs),
+                      "-map", "0",
+                      "-c", "copy",''',
+              '''        args += inputArguments
+                  // `V` excludes attached pictures; `-map 0` still copies the jacket unchanged.
+                  args += listOf(
+                      "-t", seconds(segment.durationMs),
+                      "-map", "0",
+                      "-c", "copy",''',
+              "cover art preservation comment",
+          )
+          engine_path.write_text(engine)
+
+          test_path = Path("app/src/test/java/app/clipforge/media/AttachedPictureHandlingTest.kt")
+          test_path.write_text('''package app.clipforge.media
+
+          import org.junit.Assert.assertEquals
+          import org.junit.Test
+
+          class AttachedPictureHandlingTest {
+
+              @Test
+              fun attachedPictureIsExcludedFromPlaybackVideos() {
+                  val mainVideo = video(codec = "h264")
+                  val jacket = video(codec = "mjpeg", attachedPic = true)
+                  val signature = signature(mainVideo, jacket)
+
+                  assertEquals(listOf(mainVideo), signature.playbackVideoStreams())
+              }
+
+              @Test
+              fun realSecondVideoTrackIsStillRejectedByCount() {
+                  val signature = signature(video(codec = "h264"), video(codec = "hevc"))
+
+                  assertEquals(2, signature.playbackVideoStreams().size)
+              }
+
+              @Test
+              fun jacketBeforeMainVideoDoesNotBecomePlaybackVideo() {
+                  val jacket = video(codec = "png", attachedPic = true)
+                  val mainVideo = video(codec = "hevc")
+                  val signature = signature(jacket, mainVideo)
+
+                  assertEquals(listOf(mainVideo), signature.playbackVideoStreams())
+              }
+
+              private fun signature(vararg streams: StreamSignature): MediaSignature = MediaSignature(
+                  formatNames = setOf("mp4"),
+                  streams = streams.toList(),
+                  durationMs = 10_000,
+              )
+
+              private fun video(
+                  codec: String,
+                  attachedPic: Boolean = false,
+              ): StreamSignature = StreamSignature(
+                  type = "video",
+                  codec = codec,
+                  codecTag = null,
+                  width = 1920,
+                  height = 1080,
+                  sampleRate = null,
+                  channels = null,
+                  timeBase = "1/90000",
+                  attachedPic = attachedPic,
+              )
+          }
+          '''.replace("\n          ", "\n").lstrip())
+      - run: gradle --no-daemon :app:testDebugUnitTest
+      - name: Commit verified fix
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/apply-attached-pic-fix.yml
+          git add app/src/main/java/app/clipforge/media/MediaModels.kt \
+                  app/src/main/java/app/clipforge/media/FfmpegMediaEngine.kt \
+                  app/src/test/java/app/clipforge/media/AttachedPictureHandlingTest.kt
+          git commit -m "Fix exact cut with embedded cover art"
+          git push origin HEAD:main
