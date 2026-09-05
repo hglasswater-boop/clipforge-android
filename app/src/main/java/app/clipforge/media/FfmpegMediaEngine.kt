@@ -173,6 +173,9 @@ private fun formatDimensions(stream: StreamSignature): String =
         "不明"
     }
 
+internal fun MediaSignature.playbackVideoStreams(): List<StreamSignature> =
+    streams.filter { it.type == "video" && !it.attachedPic }
+
 class FfmpegMediaEngine {
 
     suspend fun probe(file: File): MediaSignature = probePath(file.absolutePath, file.name)
@@ -198,7 +201,7 @@ class FfmpegMediaEngine {
     private fun probeWithArguments(inputArguments: List<String>, displayName: String): MediaSignature {
         val arguments = mutableListOf(
             "-v", "error",
-            "-show_entries", "format=format_name,duration:stream=codec_type,codec_name,codec_tag_string,width,height,sample_rate,channels,time_base",
+            "-show_entries", "format=format_name,duration:stream=codec_type,codec_name,codec_tag_string,width,height,sample_rate,channels,time_base:stream_disposition=attached_pic",
             "-of", "json",
         )
         arguments += inputArguments
@@ -237,6 +240,8 @@ class FfmpegMediaEngine {
                             sampleRate = stream.optString("sample_rate").toIntOrNull(),
                             channels = stream.optInt("channels").takeIf { stream.has("channels") },
                             timeBase = stream.optString("time_base").takeIf { it.isNotBlank() },
+                            attachedPic = stream.optJSONObject("disposition")
+                                ?.optInt("attached_pic", 0) == 1,
                         ),
                     )
                 }
@@ -249,7 +254,7 @@ class FfmpegMediaEngine {
         val session = FFprobeKit.executeWithArguments(
             arrayOf(
                 "-v", "error",
-                "-select_streams", "v:0",
+                "-select_streams", "V:0",
                 "-skip_frame", "nokey",
                 "-show_frames",
                 "-show_entries", "frame=best_effort_timestamp_time",
@@ -433,7 +438,7 @@ class FfmpegMediaEngine {
         segment: MediaSegment,
         onProgressPercent: (Int) -> Unit,
     ) {
-        val videoStreams = sourceSignature.streams.filter { it.type == "video" }
+        val videoStreams = sourceSignature.playbackVideoStreams()
         require(videoStreams.size == 1) {
             "正確カットは映像トラックが1本の動画に対応しています。完全無劣化モードを使用してください"
         }
@@ -452,20 +457,21 @@ class FfmpegMediaEngine {
             "-ss", seconds(segment.startMs),
         )
         args += inputArguments
+        // `V` excludes attached pictures; `-map 0` still copies the jacket unchanged.
         args += listOf(
             "-t", seconds(segment.durationMs),
             "-map", "0",
             "-c", "copy",
-            "-c:v:0", encoder,
-            "-b:v:0", smartBoundaryBitrate(video, video.codec).toString(),
+            "-c:V:0", encoder,
+            "-b:V:0", smartBoundaryBitrate(video, video.codec).toString(),
         )
         if (video.codec == "h264") {
-            args += listOf("-pix_fmt", "yuv420p")
+            args += listOf("-pix_fmt:V:0", "yuv420p")
         }
         if (output.extension.equals("mp4", ignoreCase = true)) {
             video.codecTag
                 ?.takeIf { it == "avc1" || it == "hvc1" || it == "hev1" }
-                ?.let { args += listOf("-tag:v:0", it) }
+                ?.let { args += listOf("-tag:V:0", it) }
             videoTimeScale(video.timeBase)?.let { scale ->
                 args += listOf("-video_track_timescale", scale.toString())
             }

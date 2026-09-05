@@ -10,7 +10,8 @@ data class StreamSignature(
     val height: Int?,
     val sampleRate: Int?,
     val channels: Int?,
-    val timeBase: String?
+    val timeBase: String?,
+    val attachedPic: Boolean = false,
 )
 
 data class MediaSignature(
