@@ -40,6 +40,46 @@ class SmartCutPlanTest {
     }
 
     @Test
+    fun `only arbitrary start reencodes head then copies`() {
+        val parts = planSmartCutSegment(
+            segment = MediaSegment(1_250, 6_000),
+            durationMs = 10_000,
+            startPreviousSyncMs = 1_000,
+            startNextSyncMs = 2_000,
+            endPreviousSyncMs = 6_000,
+            endNextSyncMs = 6_000,
+        )
+
+        assertEquals(
+            listOf(
+                SmartCutPart.Reencode(MediaSegment(1_250, 2_000)),
+                SmartCutPart.Copy(MediaSegment(2_000, 6_000)),
+            ),
+            parts,
+        )
+    }
+
+    @Test
+    fun `only arbitrary end copies then reencodes tail`() {
+        val parts = planSmartCutSegment(
+            segment = MediaSegment(2_000, 6_750),
+            durationMs = 10_000,
+            startPreviousSyncMs = 2_000,
+            startNextSyncMs = 2_000,
+            endPreviousSyncMs = 6_000,
+            endNextSyncMs = 7_000,
+        )
+
+        assertEquals(
+            listOf(
+                SmartCutPart.Copy(MediaSegment(2_000, 6_000)),
+                SmartCutPart.Reencode(MediaSegment(6_000, 6_750)),
+            ),
+            parts,
+        )
+    }
+
+    @Test
     fun `range inside one GOP is reencoded as one small piece`() {
         val parts = planSmartCutSegment(
             segment = MediaSegment(1_200, 1_800),
@@ -51,6 +91,20 @@ class SmartCutPlanTest {
         )
 
         assertEquals(listOf(SmartCutPart.Reencode(MediaSegment(1_200, 1_800))), parts)
+    }
+
+    @Test
+    fun `millisecond rounding near sync frame remains lossless`() {
+        val parts = planSmartCutSegment(
+            segment = MediaSegment(1_001, 4_999),
+            durationMs = 10_000,
+            startPreviousSyncMs = 1_000,
+            startNextSyncMs = 1_000,
+            endPreviousSyncMs = 5_000,
+            endNextSyncMs = 5_000,
+        )
+
+        assertEquals(listOf(SmartCutPart.Copy(MediaSegment(1_001, 4_999))), parts)
     }
 
     @Test

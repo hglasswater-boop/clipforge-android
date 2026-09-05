@@ -9,6 +9,8 @@ import app.clipforge.media.CutMode
 import app.clipforge.media.FfmpegMediaEngine
 import app.clipforge.media.MediaSegment
 import app.clipforge.media.normalizeCutRanges
+import app.clipforge.media.rangeAfterSettingEnd
+import app.clipforge.media.rangeAfterSettingStart
 import app.clipforge.media.remainingSegments
 import app.clipforge.processing.ClipForgeProcessingService
 import app.clipforge.processing.ProcessingState
@@ -53,6 +55,7 @@ data class TrimEditorState(
     val thumbnailPaths: List<String>,
     val cutRanges: List<MediaSegment> = emptyList(),
     val cutMode: CutMode = CutMode.SMART,
+    val editingCutIndex: Int? = null,
 ) {
     val removedDurationMs: Long
         get() = cutRanges.sumOf(MediaSegment::durationMs)
@@ -80,6 +83,7 @@ data class MainUiState(
     val busy: Boolean = false,
     val progressPercent: Int? = null,
     val canCancelProcessing: Boolean = false,
+    val canUndoEdit: Boolean = false,
     val selectedVideos: List<PickedVideo> = emptyList(),
     val trimEditor: TrimEditorState? = null,
     val pendingOutput: PendingOutput? = null,
@@ -103,6 +107,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var thumbnailJob: Job? = null
     private var thumbnailJobSessionPath: String? = null
     private var editorBeforeCutProcessing: TrimEditorState? = null
+    private val editUndoStack = ArrayDeque<TrimEditorState>()
 
     init {
         viewModelScope.launch {
@@ -118,43 +123,49 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             error = null,
                         )
                     }
-                    is ProcessingState.CutPrepared -> _uiState.update { state ->
-                        val preparedSource = PickedVideo(
-                            uri = processing.sourceUri,
-                            displayName = processing.sourceName,
-                            sizeBytes = state.selectedVideos
-                                .firstOrNull { it.uri == processing.sourceUri }
-                                ?.sizeBytes,
-                        )
-                        state.copy(
-                            busy = false,
-                            progressPercent = null,
-                            canCancelProcessing = false,
-                            selectedVideos = state.selectedVideos.ifEmpty { listOf(preparedSource) },
-                            trimEditor = TrimEditorState(
-                                sourceUri = processing.sourceUri,
-                                sourceName = processing.sourceName,
-                                sessionPath = processing.sessionPath,
-                                localPath = processing.localPath,
-                                durationMs = processing.durationMs,
-                                startMs = 0L,
-                                endMs = processing.durationMs,
-                                thumbnailPaths = processing.thumbnailPaths,
-                                cutRanges = emptyList(),
-                                cutMode = CutMode.SMART,
-                            ),
-                            pendingDestination = null,
-                            status = "再生位置を使って削除範囲を追加してください",
-                            error = null,
-                        )
+                    is ProcessingState.CutPrepared -> {
+                        resetEditHistory()
+                        _uiState.update { state ->
+                            val preparedSource = PickedVideo(
+                                uri = processing.sourceUri,
+                                displayName = processing.sourceName,
+                                sizeBytes = state.selectedVideos
+                                    .firstOrNull { it.uri == processing.sourceUri }
+                                    ?.sizeBytes,
+                            )
+                            state.copy(
+                                busy = false,
+                                progressPercent = null,
+                                canCancelProcessing = false,
+                                canUndoEdit = false,
+                                selectedVideos = state.selectedVideos.ifEmpty { listOf(preparedSource) },
+                                trimEditor = TrimEditorState(
+                                    sourceUri = processing.sourceUri,
+                                    sourceName = processing.sourceName,
+                                    sessionPath = processing.sessionPath,
+                                    localPath = processing.localPath,
+                                    durationMs = processing.durationMs,
+                                    startMs = 0L,
+                                    endMs = processing.durationMs,
+                                    thumbnailPaths = processing.thumbnailPaths,
+                                    cutRanges = emptyList(),
+                                    cutMode = CutMode.SMART,
+                                ),
+                                pendingDestination = null,
+                                status = "削除したい範囲を選んで追加してください",
+                                error = null,
+                            )
+                        }
                     }
                     is ProcessingState.Success -> {
                         editorBeforeCutProcessing = null
+                        resetEditHistory()
                         _uiState.update {
                             it.copy(
                                 busy = false,
                                 progressPercent = null,
                                 canCancelProcessing = false,
+                                canUndoEdit = false,
                                 status = processing.message,
                                 error = null,
                             )
@@ -169,6 +180,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 progressPercent = null,
                                 canCancelProcessing = false,
                                 trimEditor = it.trimEditor ?: editorToRestore,
+                                canUndoEdit = editUndoStack.isNotEmpty(),
                                 status = "失敗",
                                 error = processing.message,
                             )
@@ -183,6 +195,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 progressPercent = null,
                                 canCancelProcessing = false,
                                 trimEditor = it.trimEditor ?: editorToRestore,
+                                canUndoEdit = editUndoStack.isNotEmpty(),
                                 status = processing.message,
                                 error = null,
                             )
@@ -217,12 +230,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val oldSession = _uiState.value.trimEditor?.sessionPath
                 cancelThumbnailLoading()
                 editorBeforeCutProcessing = null
+                resetEditHistory()
                 _uiState.update {
                     it.copy(
                         selectedVideos = videos,
                         trimEditor = null,
                         pendingOutput = null,
                         pendingDestination = null,
+                        canUndoEdit = false,
                         status = "${videos.size}本の動画を選択しました",
                         error = if (videos.size != unique.size) "MP4 / MKV 以外のファイルは除外しました" else null,
                     )
@@ -429,11 +444,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val source = selected.single()
         cancelThumbnailLoading()
         ProcessingStateStore.idle()
+        resetEditHistory()
         _uiState.update {
             it.copy(
                 busy = true,
                 progressPercent = 0,
                 canCancelProcessing = true,
+                canUndoEdit = false,
                 status = "編集画面を準備中",
                 error = null,
             )
@@ -493,52 +510,120 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setTrimStartAt(positionMs: Long) {
         val editor = _uiState.value.trimEditor ?: return
-        val duration = editor.durationMs.coerceAtLeast(1L)
-        val position = positionMs.coerceIn(0L, duration - 1L)
-        val updated = if (position < editor.endMs) {
-            editor.copy(startMs = position)
-        } else {
-            editor.copy(startMs = position, endMs = duration)
-        }
+        val range = rangeAfterSettingStart(
+            durationMs = editor.durationMs,
+            currentStartMs = editor.startMs,
+            currentEndMs = editor.endMs,
+            positionMs = positionMs,
+        )
         _uiState.update {
-            it.copy(trimEditor = updated, status = "開始位置を設定しました", error = null)
+            it.copy(
+                trimEditor = editor.copy(startMs = range.startMs, endMs = range.endMs),
+                status = "開始位置を設定しました",
+                error = null,
+            )
         }
     }
 
     fun setTrimEndAt(positionMs: Long) {
         val editor = _uiState.value.trimEditor ?: return
-        val duration = editor.durationMs.coerceAtLeast(1L)
-        val position = positionMs.coerceIn(1L, duration)
-        val updated = if (position > editor.startMs) {
-            editor.copy(endMs = position)
-        } else {
-            editor.copy(startMs = 0L, endMs = position)
-        }
+        val range = rangeAfterSettingEnd(
+            durationMs = editor.durationMs,
+            currentStartMs = editor.startMs,
+            currentEndMs = editor.endMs,
+            positionMs = positionMs,
+        )
         _uiState.update {
-            it.copy(trimEditor = updated, status = "終了位置を設定しました", error = null)
+            it.copy(
+                trimEditor = editor.copy(startMs = range.startMs, endMs = range.endMs),
+                status = "終了位置を設定しました",
+                error = null,
+            )
         }
     }
 
     fun setCutMode(mode: CutMode) {
         if (_uiState.value.busy) return
-        val editor = _uiState.value.trimEditor ?: return
+        val state = _uiState.value
+        val editor = state.trimEditor ?: return
         if (editor.cutMode == mode) return
-        if (editor.cutRanges.isNotEmpty()) {
-            showError("カット方式を変更するには、先に削除リストをすべて解除してください")
+
+        if (mode == CutMode.SMART) {
+            recordEditUndo(editor)
+            _uiState.update {
+                it.copy(
+                    trimEditor = editor.copy(cutMode = CutMode.SMART, editingCutIndex = null),
+                    canUndoEdit = true,
+                    status = "正確カットに切り替えました",
+                    error = null,
+                )
+            }
             return
         }
-        _uiState.update {
-            it.copy(
-                trimEditor = editor.copy(cutMode = mode),
-                status = if (mode == CutMode.SMART) {
-                    "正確カット: 指定位置を維持し、境界だけ再エンコードします"
-                } else {
-                    "完全無劣化: カット位置をキーフレームに合わせます"
-                },
-                error = null,
-            )
+
+        val source = sourceFor(editor, state)
+        viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    busy = true,
+                    progressPercent = null,
+                    canCancelProcessing = false,
+                    status = "削除範囲をキーフレームに合わせています",
+                    error = null,
+                )
+            }
+            try {
+                val snappedCuts = editor.cutRanges.map { range ->
+                    val snapped = pipeline.snapCutRange(
+                        source = source,
+                        localInputPath = editor.localPath,
+                        durationMs = editor.durationMs,
+                        requestedStartMs = range.startMs,
+                        requestedEndMs = range.endMs,
+                    )
+                    MediaSegment(snapped.first, snapped.last)
+                }
+                val normalized = normalizeCutRanges(editor.durationMs, snappedCuts)
+                require(remainingSegments(editor.durationMs, normalized).isNotEmpty()) {
+                    "キーフレームへ合わせると動画全体が削除対象になります。正確カットを使用してください"
+                }
+                val snappedSelection = pipeline.snapCutRange(
+                    source = source,
+                    localInputPath = editor.localPath,
+                    durationMs = editor.durationMs,
+                    requestedStartMs = editor.startMs,
+                    requestedEndMs = editor.endMs,
+                )
+                recordEditUndo(editor)
+                _uiState.update { currentState ->
+                    val current = currentState.trimEditor ?: return@update currentState
+                    if (current.sessionPath != editor.sessionPath) return@update currentState
+                    currentState.copy(
+                        trimEditor = current.copy(
+                            cutMode = CutMode.LOSSLESS,
+                            startMs = snappedSelection.first,
+                            endMs = snappedSelection.last,
+                            cutRanges = normalized,
+                            editingCutIndex = null,
+                        ),
+                        canUndoEdit = true,
+                        status = "完全無劣化に切り替えました（登録済み範囲も変換済み）",
+                        error = null,
+                    )
+                }
+            } catch (error: Throwable) {
+                _uiState.update {
+                    it.copy(
+                        status = "完全無劣化へ切り替えられませんでした",
+                        error = error.message ?: error.javaClass.simpleName,
+                    )
+                }
+            } finally {
+                _uiState.update {
+                    it.copy(busy = false, progressPercent = null, canCancelProcessing = false)
+                }
+            }
         }
-        if (mode == CutMode.LOSSLESS) snapTrimRangeToKeyframes()
     }
 
     suspend fun adjacentKeyframe(positionMs: Long, forward: Boolean): Long? {
@@ -591,25 +676,63 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun selectCutRange(index: Int) {
+        if (_uiState.value.busy) return
+        _uiState.update { state ->
+            val editor = state.trimEditor ?: return@update state
+            val range = editor.cutRanges.getOrNull(index) ?: return@update state
+            state.copy(
+                trimEditor = editor.copy(
+                    startMs = range.startMs,
+                    endMs = range.endMs,
+                    editingCutIndex = index,
+                ),
+                status = "削除範囲 #${index + 1} を編集中",
+                error = null,
+            )
+        }
+    }
+
+    fun startNewCutRange() {
+        if (_uiState.value.busy) return
+        _uiState.update { state ->
+            val editor = state.trimEditor ?: return@update state
+            state.copy(
+                trimEditor = editor.copy(editingCutIndex = null),
+                status = "新しい削除範囲を選択してください",
+                error = null,
+            )
+        }
+    }
+
     fun addCurrentCutRange() {
         val editor = _uiState.value.trimEditor ?: return
         if (_uiState.value.busy) return
         val requestedStart = editor.startMs
         val requestedEnd = editor.endMs
+        val editIndex = editor.editingCutIndex?.takeIf { it in editor.cutRanges.indices }
+        val baseRanges = if (editIndex == null) {
+            editor.cutRanges
+        } else {
+            editor.cutRanges.filterIndexed { index, _ -> index != editIndex }
+        }
+        val action = if (editIndex == null) "追加" else "更新"
 
         if (editor.cutMode == CutMode.SMART) {
             val candidate = MediaSegment(requestedStart, requestedEnd)
-            val normalized = normalizeCutRanges(editor.durationMs, editor.cutRanges + candidate)
+            val normalized = normalizeCutRanges(editor.durationMs, baseRanges + candidate)
             if (remainingSegments(editor.durationMs, normalized).isEmpty()) {
                 showError("動画全体を削除する範囲は追加できません")
                 return
             }
+            recordEditUndo(editor)
             _uiState.update { state ->
                 val current = state.trimEditor ?: return@update state
                 if (current.sessionPath != editor.sessionPath) return@update state
                 state.copy(
-                    trimEditor = current.copy(cutRanges = normalized),
-                    status = "指定位置のまま削除範囲を追加しました（${normalized.size}箇所）",
+                    trimEditor = current.copy(cutRanges = normalized, editingCutIndex = null),
+                    canUndoEdit = true,
+                    status = "削除範囲を${action}しました（${normalized.size}箇所）",
                     error = null,
                 )
             }
@@ -636,10 +759,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     requestedEndMs = requestedEnd,
                 )
                 val candidate = MediaSegment(snapped.first, snapped.last)
-                val normalized = normalizeCutRanges(editor.durationMs, editor.cutRanges + candidate)
+                val normalized = normalizeCutRanges(editor.durationMs, baseRanges + candidate)
                 require(remainingSegments(editor.durationMs, normalized).isNotEmpty()) {
                     "動画全体を削除する範囲は追加できません"
                 }
+                recordEditUndo(editor)
                 _uiState.update { state ->
                     val current = state.trimEditor ?: return@update state
                     if (current.sessionPath != editor.sessionPath) return@update state
@@ -648,15 +772,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             startMs = candidate.startMs,
                             endMs = candidate.endMs,
                             cutRanges = normalized,
+                            editingCutIndex = null,
                         ),
-                        status = "無劣化の削除範囲を追加しました（${normalized.size}箇所）",
+                        canUndoEdit = true,
+                        status = "無劣化の削除範囲を${action}しました（${normalized.size}箇所）",
                         error = null,
                     )
                 }
             } catch (error: Throwable) {
                 _uiState.update {
                     it.copy(
-                        status = "削除範囲を追加できませんでした",
+                        status = "削除範囲を${action}できませんでした",
                         error = error.message ?: error.javaClass.simpleName,
                     )
                 }
@@ -673,9 +799,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update { state ->
             val editor = state.trimEditor ?: return@update state
             if (index !in editor.cutRanges.indices) return@update state
+            recordEditUndo(editor)
             val next = editor.cutRanges.toMutableList().apply { removeAt(index) }
+            val editingIndex = editor.editingCutIndex?.let { selected ->
+                when {
+                    selected == index -> null
+                    selected > index -> selected - 1
+                    else -> selected
+                }
+            }
             state.copy(
-                trimEditor = editor.copy(cutRanges = next),
+                trimEditor = editor.copy(cutRanges = next, editingCutIndex = editingIndex),
+                canUndoEdit = true,
                 status = if (next.isEmpty()) "削除範囲はありません" else "削除範囲: ${next.size}箇所",
                 error = null,
             )
@@ -686,9 +821,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (_uiState.value.busy) return
         _uiState.update { state ->
             val editor = state.trimEditor ?: return@update state
+            if (editor.cutRanges.isEmpty()) return@update state
+            recordEditUndo(editor)
             state.copy(
-                trimEditor = editor.copy(cutRanges = emptyList()),
-                status = "削除範囲をすべて解除しました",
+                trimEditor = editor.copy(cutRanges = emptyList(), editingCutIndex = null),
+                canUndoEdit = true,
+                status = "削除範囲をすべて解除しました。元に戻すこともできます",
+                error = null,
+            )
+        }
+    }
+
+    fun undoEdit() {
+        if (_uiState.value.busy || editUndoStack.isEmpty()) return
+        val previous = editUndoStack.removeLast()
+        _uiState.update { state ->
+            val current = state.trimEditor ?: return@update state
+            if (current.sessionPath != previous.sessionPath) {
+                resetEditHistory()
+                return@update state.copy(canUndoEdit = false)
+            }
+            state.copy(
+                trimEditor = previous.copy(thumbnailPaths = current.thumbnailPaths),
+                canUndoEdit = editUndoStack.isNotEmpty(),
+                status = "元に戻しました",
                 error = null,
             )
         }
@@ -703,11 +859,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val editor = _uiState.value.trimEditor ?: return
         cancelThumbnailLoading()
         editorBeforeCutProcessing = null
+        resetEditHistory()
         _uiState.update {
             it.copy(
                 trimEditor = null,
                 progressPercent = null,
                 canCancelProcessing = false,
+                canUndoEdit = false,
                 status = "編集をキャンセルしました",
                 error = null,
             )
@@ -722,6 +880,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun outputHandoffFailed(message: String) {
         _uiState.update { it.copy(pendingOutput = null, status = "出力の受け渡しに失敗しました", error = message) }
+    }
+
+    private fun recordEditUndo(editor: TrimEditorState) {
+        if (editUndoStack.size >= MAX_EDIT_UNDO) editUndoStack.removeFirst()
+        editUndoStack.addLast(editor)
+    }
+
+    private fun resetEditHistory() {
+        editUndoStack.clear()
     }
 
     private fun sourceFor(editor: TrimEditorState, state: MainUiState): PickedVideo =
@@ -792,5 +959,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun showError(message: String) {
         _uiState.update { it.copy(error = message) }
+    }
+
+    private companion object {
+        const val MAX_EDIT_UNDO = 20
     }
 }
