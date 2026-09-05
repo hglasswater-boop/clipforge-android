@@ -175,7 +175,7 @@ private object ClipForgeSelfUpdater {
 }
 
 @Composable
-fun ClipForgeUpdateHost() {
+fun ClipForgeUpdateHost(showEntryButton: Boolean = true) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var showSettings by remember { mutableStateOf(false) }
@@ -194,15 +194,17 @@ fun ClipForgeUpdateHost() {
             }
     }
 
-    Box(Modifier.fillMaxSize()) {
-        OutlinedButton(
-            onClick = { showSettings = true },
-            modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .navigationBarsPadding()
-                .padding(16.dp)
-        ) {
-            Text("更新")
+    if (showEntryButton) {
+        Box(Modifier.fillMaxSize()) {
+            OutlinedButton(
+                onClick = { showSettings = true },
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .navigationBarsPadding()
+                    .padding(16.dp)
+            ) {
+                Text("更新")
+            }
         }
     }
 
