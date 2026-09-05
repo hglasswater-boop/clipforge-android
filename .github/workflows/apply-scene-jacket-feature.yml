@@ -83,6 +83,10 @@ jobs:
                   line = r'''private val blackStartRegex = Regex("""black_start:([0-9]+(?:\.[0-9]+)?)""")'''
               fixed_lines.append(line)
           source = "\n".join(fixed_lines) + "\n"
+          source = source.replace(
+              '''        val duplicate = result.lastOrNull()?.let { previous ->\n            previous.kind == marker.kind && kotlin.math.abs(previous.timeMs - marker.timeMs) <= 120L\n        } ?: false\n''',
+              '''        val duplicate = result.lastOrNull { it.kind == marker.kind }?.let { previous ->\n            kotlin.math.abs(previous.timeMs - marker.timeMs) <= 120L\n        } ?: false\n''',
+          )
           detector.write_text(source)
           PY
 
