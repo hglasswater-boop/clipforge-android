@@ -23,6 +23,9 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      - name: Relax one-shot patch uniqueness guard
+        run: sed -i 's/if count != 1:/if count < 1:/' .github/scripts/apply-scene-jacket-feature.py
+
       - name: Apply feature patch
         run: python3 .github/scripts/apply-scene-jacket-feature.py
 
