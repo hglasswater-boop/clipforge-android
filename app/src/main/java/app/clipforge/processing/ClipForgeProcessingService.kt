@@ -16,6 +16,8 @@ import app.clipforge.media.MediaSegment
 import app.clipforge.workflow.ExternalEditPipeline
 import app.clipforge.workflow.MultiCutExporter
 import app.clipforge.workflow.PickedVideo
+import com.arthenica.ffmpegkit.FFmpegKit
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -27,6 +29,7 @@ class ClipForgeProcessingService : Service() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var processingJob: Job? = null
     private var wakeLock: PowerManager.WakeLock? = null
+    @Volatile private var cancellationRequested = false
 
     override fun onCreate() {
         super.onCreate()
@@ -35,7 +38,23 @@ class ClipForgeProcessingService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val request = intent ?: return START_NOT_STICKY
+
+        if (request.action == ACTION_CANCEL) {
+            val activeJob = processingJob?.takeIf { !it.isCompleted }
+            if (activeJob == null) {
+                finishCancelled("処理をキャンセルしました")
+                stopSelf(startId)
+                return START_NOT_STICKY
+            }
+            cancellationRequested = true
+            updateProgress("ClipForge", "キャンセルしています")
+            FFmpegKit.cancel()
+            activeJob.cancel(CancellationException("Cancelled by user"))
+            return START_NOT_STICKY
+        }
+
         if (processingJob?.isActive == true) return START_NOT_STICKY
+        cancellationRequested = false
 
         val title = when (request.action) {
             ACTION_PREPARE_CUT -> "カット編集を準備中"
@@ -70,11 +89,17 @@ class ClipForgeProcessingService : Service() {
                     ACTION_CUT -> cut(request, title, multiCutExporter)
                 }
             } catch (error: Throwable) {
-                val detail = error.message?.takeIf { it.isNotBlank() } ?: error.javaClass.simpleName
-                finishFailure("処理に失敗しました: $detail")
+                if (cancellationRequested || error is CancellationException) {
+                    finishCancelled("処理をキャンセルしました")
+                } else {
+                    val detail = error.message?.takeIf { it.isNotBlank() } ?: error.javaClass.simpleName
+                    finishFailure("処理に失敗しました: $detail")
+                }
             } finally {
                 releaseOutputGrant(request.getStringExtra(EXTRA_OUTPUT_URI))
                 releaseWakeLock()
+                cancellationRequested = false
+                processingJob = null
                 stopSelf(startId)
             }
         }
@@ -163,7 +188,11 @@ class ClipForgeProcessingService : Service() {
     }
 
     override fun onDestroy() {
-        processingJob?.cancel()
+        if (processingJob?.isActive == true) {
+            cancellationRequested = true
+            FFmpegKit.cancel()
+            processingJob?.cancel()
+        }
         releaseWakeLock()
         serviceScope.cancel()
         super.onDestroy()
@@ -192,6 +221,13 @@ class ClipForgeProcessingService : Service() {
 
     private fun finishFailure(message: String) {
         ProcessingStateStore.failure(message)
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        getSystemService(NotificationManager::class.java)
+            .notify(NOTIFICATION_ID, buildNotification("ClipForge", message, false, null))
+    }
+
+    private fun finishCancelled(message: String) {
+        ProcessingStateStore.cancelled(message)
         stopForeground(STOP_FOREGROUND_REMOVE)
         getSystemService(NotificationManager::class.java)
             .notify(NOTIFICATION_ID, buildNotification("ClipForge", message, false, null))
@@ -275,6 +311,7 @@ class ClipForgeProcessingService : Service() {
         private const val ACTION_PREPARE_CUT = "app.clipforge.action.PREPARE_CUT"
         private const val ACTION_CONCAT = "app.clipforge.action.CONCAT"
         private const val ACTION_CUT = "app.clipforge.action.CUT"
+        private const val ACTION_CANCEL = "app.clipforge.action.CANCEL"
         private const val EXTRA_INPUT_URI = "inputUri"
         private const val EXTRA_INPUT_NAME = "inputName"
         private const val EXTRA_INPUT_SIZE_BYTES = "inputSizeBytes"
@@ -332,6 +369,12 @@ class ClipForgeProcessingService : Service() {
                 .putExtra(EXTRA_CUT_ENDS, cutRanges.map(MediaSegment::endMs).toLongArray())
             localInputPath?.let { intent.putExtra(EXTRA_LOCAL_INPUT, it) }
             context.startForegroundService(intent)
+        }
+
+        fun cancelProcessing(context: Context) {
+            context.startService(
+                Intent(context, ClipForgeProcessingService::class.java).setAction(ACTION_CANCEL),
+            )
         }
 
         private fun Intent.putSource(source: PickedVideo): Intent =
