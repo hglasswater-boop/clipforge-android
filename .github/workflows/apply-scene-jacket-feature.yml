@@ -45,6 +45,7 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
+          import re
 
           ui = Path("app/src/main/java/app/clipforge/ui/ClipForgeApp.kt")
           source = ui.read_text()
@@ -56,22 +57,21 @@ jobs:
 
           exporter = Path("app/src/main/java/app/clipforge/workflow/MultiCutExporter.kt")
           source = exporter.read_text()
-          old = """        if (reencodeCount == 0) {
-              exportLosslessDescriptor(source, keepSegments, outputFd, outputName, workDir) { percent ->
-          """
-          new = """        if (reencodeCount == 0) {
-              exportLosslessDescriptor(
-                  source = source,
-                  sourceSignature = sourceSignature,
-                  keepSegments = keepSegments,
-                  outputFd = outputFd,
-                  outputName = outputName,
-                  workDir = workDir,
-              ) { percent ->
-          """
-          if old not in source:
-              raise SystemExit("smart lossless fallback call not found")
-          exporter.write_text(source.replace(old, new, 1))
+          pattern = re.compile(
+              r"exportLosslessDescriptor\(\s*source\s*,\s*keepSegments\s*,\s*outputFd\s*,\s*outputName\s*,\s*workDir\s*\)\s*\{\s*percent\s*->"
+          )
+          replacement = """exportLosslessDescriptor(
+                      source = source,
+                      sourceSignature = sourceSignature,
+                      keepSegments = keepSegments,
+                      outputFd = outputFd,
+                      outputName = outputName,
+                      workDir = workDir,
+                  ) { percent ->"""
+          source, replacements = pattern.subn(replacement, source, count=1)
+          if replacements != 1:
+              raise SystemExit(f"smart lossless fallback replacements={replacements}")
+          exporter.write_text(source)
 
           detector = Path("app/src/main/java/app/clipforge/media/SceneChangeDetector.kt")
           source = detector.read_text()
