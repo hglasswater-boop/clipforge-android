@@ -20,6 +20,7 @@ sealed interface ProcessingState {
     ) : ProcessingState
     data class Success(val message: String) : ProcessingState
     data class Failure(val message: String) : ProcessingState
+    data class Cancelled(val message: String) : ProcessingState
 }
 
 object ProcessingStateStore {
@@ -62,5 +63,9 @@ object ProcessingStateStore {
 
     fun failure(message: String) {
         _state.value = ProcessingState.Failure(message)
+    }
+
+    fun cancelled(message: String) {
+        _state.value = ProcessingState.Cancelled(message)
     }
 }
