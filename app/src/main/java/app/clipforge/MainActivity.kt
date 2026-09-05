@@ -10,10 +10,13 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import app.clipforge.ui.ClipForgeApp
 import app.clipforge.ui.ClipForgeDirectOutputHost
@@ -26,12 +29,19 @@ class MainActivity : ComponentActivity() {
         requestNotificationPermissionOnce()
         setContent {
             val mainViewModel: MainViewModel = viewModel()
+            val mainState by mainViewModel.uiState.collectAsStateWithLifecycle()
             val dark = isSystemInDarkTheme()
             MaterialTheme(colorScheme = if (dark) darkColorScheme() else lightColorScheme()) {
                 Box(Modifier.fillMaxSize()) {
-                    ClipForgeApp(mainViewModel)
+                    Box(
+                        Modifier
+                            .fillMaxSize()
+                            .navigationBarsPadding()
+                    ) {
+                        ClipForgeApp(mainViewModel)
+                    }
                     ClipForgeDirectOutputHost(mainViewModel)
-                    ClipForgeUpdateHost()
+                    ClipForgeUpdateHost(showEntryButton = mainState.trimEditor == null)
                 }
             }
         }
