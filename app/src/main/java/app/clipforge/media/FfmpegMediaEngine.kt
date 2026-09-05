@@ -32,6 +32,30 @@ internal fun fdConcatScript(inputs: List<NamedMediaDescriptor>): String = buildS
     }
 }
 
+internal fun fdSegmentConcatScript(fd: Int, segments: List<MediaSegment>): String = buildString {
+    appendLine("ffconcat version 1.0")
+    segments.forEach { segment ->
+        appendLine("file 'fd:'")
+        appendLine("option fd $fd")
+        appendLine("inpoint ${concatTimestamp(segment.startMs)}")
+        appendLine("outpoint ${concatTimestamp(segment.endMs)}")
+    }
+}
+
+private fun pathSegmentConcatScript(path: String, segments: List<MediaSegment>): String = buildString {
+    appendLine("ffconcat version 1.0")
+    segments.forEach { segment ->
+        appendLine("file '${escapeConcatPathValue(path)}'")
+        appendLine("inpoint ${concatTimestamp(segment.startMs)}")
+        appendLine("outpoint ${concatTimestamp(segment.endMs)}")
+    }
+}
+
+private fun concatTimestamp(ms: Long): String =
+    "%.3f".format(java.util.Locale.US, ms / 1000.0)
+
+private fun escapeConcatPathValue(path: String): String = path.replace("'", "'\\''")
+
 private val mp4FamilyFormats = setOf("mov", "mp4", "m4a", "3gp", "3g2", "mj2")
 
 /**
@@ -313,6 +337,78 @@ class FfmpegMediaEngine {
         runFfmpeg(args)
     }
 
+    /**
+     * Keeps several ranges from one local source and joins them into one output in a single FFmpeg
+     * command. Callers must snap range boundaries to sync frames before reaching this method.
+     */
+    suspend fun concatSegmentsLosslessToDescriptor(
+        inputPath: String,
+        outputFd: Int,
+        outputName: String,
+        segments: List<MediaSegment>,
+        workingDirectory: File,
+    ) = withContext(Dispatchers.IO) {
+        require(segments.size >= 2) { "At least two segments are required" }
+        workingDirectory.mkdirs()
+        val listFile = File(workingDirectory, ".clipforge-segments-${System.nanoTime()}.ffconcat")
+        try {
+            listFile.writeText(pathSegmentConcatScript(inputPath, segments))
+            runFfmpeg(
+                listOf(
+                    "-hide_banner", "-y",
+                    "-f", "concat",
+                    "-safe", "0",
+                    "-auto_convert", "1",
+                    "-i", listFile.absolutePath,
+                    "-map", "0",
+                    "-c", "copy",
+                    "-fflags", "+genpts",
+                    "-avoid_negative_ts", "make_zero",
+                    "-f", muxerFor(outputName),
+                    "-fd", outputFd.toString(),
+                    "fd:",
+                ),
+            )
+        } finally {
+            listFile.delete()
+        }
+    }
+
+    /** Same as [concatSegmentsLosslessToDescriptor], but the source is a seekable Android fd. */
+    suspend fun concatSegmentsLosslessDescriptors(
+        inputFd: Int,
+        outputFd: Int,
+        outputName: String,
+        segments: List<MediaSegment>,
+        workingDirectory: File,
+    ) = withContext(Dispatchers.IO) {
+        require(segments.size >= 2) { "At least two segments are required" }
+        workingDirectory.mkdirs()
+        val listFile = File(workingDirectory, ".clipforge-segments-${System.nanoTime()}.ffconcat")
+        try {
+            listFile.writeText(fdSegmentConcatScript(inputFd, segments))
+            runFfmpeg(
+                listOf(
+                    "-hide_banner", "-y",
+                    "-protocol_whitelist", "file,fd,crypto,data",
+                    "-f", "concat",
+                    "-safe", "0",
+                    "-auto_convert", "1",
+                    "-i", listFile.absolutePath,
+                    "-map", "0",
+                    "-c", "copy",
+                    "-fflags", "+genpts",
+                    "-avoid_negative_ts", "make_zero",
+                    "-f", muxerFor(outputName),
+                    "-fd", outputFd.toString(),
+                    "fd:",
+                ),
+            )
+        } finally {
+            listFile.delete()
+        }
+    }
+
     suspend fun concatLossless(inputs: List<File>, output: File): File = withContext(Dispatchers.IO) {
         require(inputs.size >= 2) { "At least two files are required" }
         output.parentFile?.mkdirs()
@@ -449,7 +545,7 @@ class FfmpegMediaEngine {
         else -> throw IllegalArgumentException("Output must end in .mp4 or .mkv")
     }
 
-    private fun seconds(ms: Long): String = "%.3f".format(java.util.Locale.US, ms / 1000.0)
+    private fun seconds(ms: Long): String = concatTimestamp(ms)
 
-    private fun escapeConcatPath(path: String): String = path.replace("'", "'\\''")
+    private fun escapeConcatPath(path: String): String = escapeConcatPathValue(path)
 }
