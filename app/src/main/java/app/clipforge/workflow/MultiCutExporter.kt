@@ -9,11 +9,13 @@ import android.system.OsConstants
 import app.clipforge.media.CutMode
 import app.clipforge.media.FfmpegMediaEngine
 import app.clipforge.media.MediaSegment
+import app.clipforge.media.MediaSignature
 import app.clipforge.media.SmartConcatInput
 import app.clipforge.media.SmartCutPart
 import app.clipforge.media.SyncFrameResolver
 import app.clipforge.media.planSmartCutSegment
 import app.clipforge.media.remainingSegments
+import app.clipforge.media.hasAttachedPicture
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -42,6 +44,15 @@ class MultiCutExporter(
         onProgress("保存内容を確認しています", 2)
         val keepSegments = remainingSegments(durationMs, cutRanges)
         require(keepSegments.isNotEmpty()) { "動画全体を削除する指定になっています" }
+        val sourceSignature = if (localInputPath != null) {
+            val input = File(localInputPath)
+            require(input.isFile) { "編集用キャッシュが見つかりません" }
+            mediaEngine.probe(input)
+        } else {
+            withReadDescriptors(source, 1) { descriptors ->
+                mediaEngine.probeDescriptor(descriptors.single().fd, source.displayName)
+            }
+        }
 
         val destination = Uri.parse(outputUri)
         val remoteDestination = isXFilesRemoteOutput(destination)
@@ -80,6 +91,7 @@ class MultiCutExporter(
                         input = input,
                         source = source,
                         durationMs = durationMs,
+                        sourceSignature = sourceSignature,
                         keepSegments = keepSegments,
                         outputFd = outputDescriptor.fd,
                         outputName = outputName,
@@ -103,6 +115,7 @@ class MultiCutExporter(
                     exportSmartDescriptor(
                         source = source,
                         durationMs = durationMs,
+                        sourceSignature = sourceSignature,
                         keepSegments = keepSegments,
                         outputFd = outputDescriptor.fd,
                         outputName = outputName,
@@ -113,6 +126,7 @@ class MultiCutExporter(
                 } else {
                     exportLosslessDescriptor(
                         source = source,
+                        sourceSignature = sourceSignature,
                         keepSegments = keepSegments,
                         outputFd = outputDescriptor.fd,
                         outputName = outputName,
@@ -175,30 +189,38 @@ class MultiCutExporter(
 
     private suspend fun exportLosslessDescriptor(
         source: PickedVideo,
+        sourceSignature: MediaSignature,
         keepSegments: List<MediaSegment>,
         outputFd: Int,
         outputName: String,
         workDir: File,
         onProgress: (Int) -> Unit,
     ) {
-        val descriptorCount = if (keepSegments.size == 1) 1 else keepSegments.size
-        withReadDescriptors(source, descriptorCount) { descriptors ->
+        val mediaDescriptorCount = if (keepSegments.size == 1) 1 else keepSegments.size
+        val totalDescriptorCount = mediaDescriptorCount + if (sourceSignature.hasAttachedPicture()) 1 else 0
+        withReadDescriptors(source, totalDescriptorCount) { descriptors ->
+            val mediaDescriptors = descriptors.take(mediaDescriptorCount)
+            val jacketFd = descriptors.getOrNull(mediaDescriptorCount)?.fd
             if (keepSegments.size == 1) {
                 val segment = keepSegments.single()
                 mediaEngine.cutLosslessDescriptors(
-                    inputFd = descriptors.single().fd,
+                    inputFd = mediaDescriptors.single().fd,
                     outputFd = outputFd,
                     outputName = outputName,
                     startMs = segment.startMs,
                     endMs = segment.endMs,
+                    sourceSignature = sourceSignature,
+                    jacketFd = jacketFd,
                     onProgressPercent = onProgress,
                 )
             } else {
                 mediaEngine.concatSegmentsLosslessDescriptors(
-                    inputFds = descriptors.map { it.fd },
+                    inputFds = mediaDescriptors.map { it.fd },
                     outputFd = outputFd,
                     outputName = outputName,
                     segments = keepSegments,
+                    sourceSignature = sourceSignature,
+                    jacketFd = jacketFd,
                     workingDirectory = workDir,
                     onProgressPercent = onProgress,
                 )
@@ -210,6 +232,7 @@ class MultiCutExporter(
         input: File,
         source: PickedVideo,
         durationMs: Long,
+        sourceSignature: MediaSignature,
         keepSegments: List<MediaSegment>,
         outputFd: Int,
         outputName: String,
@@ -218,7 +241,6 @@ class MultiCutExporter(
         onConcatProgress: (Int) -> Unit,
     ) {
         onProgress("スマートカットの境界を確認しています", 10)
-        val signature = mediaEngine.probe(input)
         val planned = planSmartParts(
             durationMs = durationMs,
             keepSegments = keepSegments,
@@ -242,7 +264,7 @@ class MultiCutExporter(
                 mediaEngine.renderSmartBoundaryToPath(
                     inputPath = input.absolutePath,
                     output = file,
-                    sourceSignature = signature,
+                    sourceSignature = sourceSignature,
                     segment = segment,
                     onProgressPercent = callback,
                 )
@@ -255,6 +277,7 @@ class MultiCutExporter(
             outputName = outputName,
             parts = concatParts,
             expectedDurationMs = keepSegments.sumOf(MediaSegment::durationMs),
+            sourceSignature = sourceSignature,
             workingDirectory = workDir,
             onProgressPercent = onConcatProgress,
         )
@@ -263,6 +286,7 @@ class MultiCutExporter(
     private suspend fun exportSmartDescriptor(
         source: PickedVideo,
         durationMs: Long,
+        sourceSignature: MediaSignature,
         keepSegments: List<MediaSegment>,
         outputFd: Int,
         outputName: String,
@@ -271,9 +295,6 @@ class MultiCutExporter(
         onConcatProgress: (Int) -> Unit,
     ) {
         onProgress("スマートカットの境界を確認しています", 10)
-        val signature = withReadDescriptors(source, 1) { descriptors ->
-            mediaEngine.probeDescriptor(descriptors.single().fd, source.displayName)
-        }
         val planned = planSmartParts(
             durationMs = durationMs,
             keepSegments = keepSegments,
@@ -290,7 +311,14 @@ class MultiCutExporter(
         )
         val reencodeCount = planned.count { it is SmartCutPart.Reencode }
         if (reencodeCount == 0) {
-            exportLosslessDescriptor(source, keepSegments, outputFd, outputName, workDir) { percent ->
+            exportLosslessDescriptor(
+            source = source,
+            sourceSignature = sourceSignature,
+            keepSegments = keepSegments,
+            outputFd = outputFd,
+            outputName = outputName,
+            workDir = workDir,
+        ) { percent ->
                 val overall = (12 + percent * 82 / 100).coerceIn(12, 94)
                 onProgress("キーフレーム一致のため無劣化で書き出し中 $percent%", overall)
             }
@@ -302,12 +330,14 @@ class MultiCutExporter(
             workDir = workDir,
             sourceExtension = sourceExtension(source.displayName),
             render = { segment, file, callback ->
-                withReadDescriptors(source, 1) { descriptors ->
+                val descriptorCount = if (sourceSignature.hasAttachedPicture()) 2 else 1
+                withReadDescriptors(source, descriptorCount) { descriptors ->
                     mediaEngine.renderSmartBoundaryDescriptor(
-                        inputFd = descriptors.single().fd,
+                        inputFd = descriptors.first().fd,
                         output = file,
-                        sourceSignature = signature,
+                        sourceSignature = sourceSignature,
                         segment = segment,
+                        jacketFd = descriptors.getOrNull(1)?.fd,
                         onProgressPercent = callback,
                     )
                 }
@@ -315,13 +345,16 @@ class MultiCutExporter(
             onProgress = onProgress,
         )
         val sourcePartCount = concatParts.count { it is SmartConcatInput.SourceSegment }
-        withReadDescriptors(source, sourcePartCount) { descriptors ->
+        val descriptorCount = sourcePartCount + if (sourceSignature.hasAttachedPicture()) 1 else 0
+        withReadDescriptors(source, descriptorCount) { descriptors ->
             mediaEngine.concatSmartPartsDescriptors(
-                inputFds = descriptors.map { it.fd },
+                inputFds = descriptors.take(sourcePartCount).map { it.fd },
                 outputFd = outputFd,
                 outputName = outputName,
                 parts = concatParts,
                 expectedDurationMs = keepSegments.sumOf(MediaSegment::durationMs),
+                sourceSignature = sourceSignature,
+                jacketFd = descriptors.getOrNull(sourcePartCount)?.fd,
                 workingDirectory = workDir,
                 onProgressPercent = onConcatProgress,
             )

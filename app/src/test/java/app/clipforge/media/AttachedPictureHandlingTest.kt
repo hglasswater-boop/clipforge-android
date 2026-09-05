@@ -15,6 +15,33 @@ class AttachedPictureHandlingTest {
     }
 
     @Test
+    fun attachedPictureMappingKeepsOriginalStreamOrder() {
+        val mainVideo = video(codec = "h264")
+        val jacket = video(codec = "mjpeg", attachedPic = true)
+        val audio = StreamSignature(
+            type = "audio",
+            codec = "aac",
+            codecTag = null,
+            width = null,
+            height = null,
+            sampleRate = 48_000,
+            channels = 2,
+            timeBase = "1/48000",
+        )
+        val signature = signature(mainVideo, jacket, audio)
+
+        assertEquals(
+            listOf(
+                "-map", "0:0",
+                "-map", "1:1",
+                "-disposition:v:1", "attached_pic",
+                "-map", "0:2",
+            ),
+            preservedStreamMapArguments(signature, primaryInputIndex = 0, jacketInputIndex = 1),
+        )
+    }
+
+    @Test
     fun realSecondVideoTrackIsStillRejectedByCount() {
         val signature = signature(video(codec = "h264"), video(codec = "hevc"))
 

@@ -5,6 +5,8 @@ import android.net.Uri
 import android.os.ParcelFileDescriptor
 import android.system.Os
 import android.system.OsConstants
+import app.clipforge.media.SceneChangeDetector
+import app.clipforge.media.SceneDetectionResult
 import app.clipforge.media.SyncFrameResolver
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -14,6 +16,7 @@ import java.io.IOException
 class CutSessionNavigator(
     context: Context,
     private val syncFrameResolver: SyncFrameResolver = SyncFrameResolver(),
+    private val sceneChangeDetector: SceneChangeDetector = SceneChangeDetector(),
 ) {
     private val contentResolver = context.applicationContext.contentResolver
 
@@ -41,6 +44,33 @@ class CutSessionNavigator(
                 durationMs = durationMs,
                 positionMs = positionMs,
                 forward = forward,
+            )
+        }
+    }
+
+    suspend fun detectSceneWindow(
+        source: PickedVideo,
+        localInputPath: String?,
+        durationMs: Long,
+        startMs: Long,
+        endMs: Long,
+    ): SceneDetectionResult = withContext(Dispatchers.IO) {
+        if (localInputPath != null) {
+            val input = File(localInputPath)
+            if (!input.isFile) return@withContext SceneDetectionResult(emptyList(), startMs, endMs)
+            return@withContext sceneChangeDetector.detectPath(
+                path = input.absolutePath,
+                durationMs = durationMs,
+                startMs = startMs,
+                endMs = endMs,
+            )
+        }
+        openSeekable(source).use { descriptor ->
+            sceneChangeDetector.detectDescriptor(
+                fd = descriptor.fd,
+                durationMs = durationMs,
+                startMs = startMs,
+                endMs = endMs,
             )
         }
     }
