@@ -263,6 +263,22 @@ class ClipForgeProcessingService : Service() {
         } else {
             builder.setProgress(0, 0, ongoing)
         }
+
+        if (ongoing) {
+            val cancelIntent = Intent(this, ClipForgeProcessingService::class.java)
+                .setAction(ACTION_CANCEL)
+            val cancelPending = PendingIntent.getService(
+                this,
+                1,
+                cancelIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+            builder.addAction(
+                android.R.drawable.ic_menu_close_clear_cancel,
+                "キャンセル",
+                cancelPending,
+            )
+        }
         return builder.build()
     }
 
