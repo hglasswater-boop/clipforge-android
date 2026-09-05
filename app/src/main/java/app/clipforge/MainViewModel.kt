@@ -77,6 +77,7 @@ data class PendingDestinationRequest(
 data class MainUiState(
     val busy: Boolean = false,
     val progressPercent: Int? = null,
+    val canCancelProcessing: Boolean = false,
     val selectedVideos: List<PickedVideo> = emptyList(),
     val trimEditor: TrimEditorState? = null,
     val pendingOutput: PendingOutput? = null,
@@ -99,6 +100,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val uiState = _uiState.asStateFlow()
     private var thumbnailJob: Job? = null
     private var thumbnailJobSessionPath: String? = null
+    private var editorBeforeCutProcessing: TrimEditorState? = null
 
     init {
         viewModelScope.launch {
@@ -109,6 +111,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         it.copy(
                             busy = true,
                             progressPercent = processing.progressPercent,
+                            canCancelProcessing = true,
                             status = processing.message,
                             error = null,
                         )
@@ -124,6 +127,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         state.copy(
                             busy = false,
                             progressPercent = null,
+                            canCancelProcessing = false,
                             selectedVideos = state.selectedVideos.ifEmpty { listOf(preparedSource) },
                             trimEditor = TrimEditorState(
                                 sourceUri = processing.sourceUri,
@@ -141,21 +145,45 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             error = null,
                         )
                     }
-                    is ProcessingState.Success -> _uiState.update {
-                        it.copy(
-                            busy = false,
-                            progressPercent = null,
-                            status = processing.message,
-                            error = null,
-                        )
+                    is ProcessingState.Success -> {
+                        editorBeforeCutProcessing = null
+                        _uiState.update {
+                            it.copy(
+                                busy = false,
+                                progressPercent = null,
+                                canCancelProcessing = false,
+                                status = processing.message,
+                                error = null,
+                            )
+                        }
                     }
-                    is ProcessingState.Failure -> _uiState.update {
-                        it.copy(
-                            busy = false,
-                            progressPercent = null,
-                            status = "失敗",
-                            error = processing.message,
-                        )
+                    is ProcessingState.Failure -> {
+                        val editorToRestore = editorBeforeCutProcessing
+                        editorBeforeCutProcessing = null
+                        _uiState.update {
+                            it.copy(
+                                busy = false,
+                                progressPercent = null,
+                                canCancelProcessing = false,
+                                trimEditor = it.trimEditor ?: editorToRestore,
+                                status = "失敗",
+                                error = processing.message,
+                            )
+                        }
+                    }
+                    is ProcessingState.Cancelled -> {
+                        val editorToRestore = editorBeforeCutProcessing
+                        editorBeforeCutProcessing = null
+                        _uiState.update {
+                            it.copy(
+                                busy = false,
+                                progressPercent = null,
+                                canCancelProcessing = false,
+                                trimEditor = it.trimEditor ?: editorToRestore,
+                                status = processing.message,
+                                error = null,
+                            )
+                        }
                     }
                 }
             }
@@ -171,6 +199,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 it.copy(
                     busy = true,
                     progressPercent = null,
+                    canCancelProcessing = false,
                     status = "選択した動画を確認中",
                     error = null,
                 )
@@ -184,6 +213,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 val oldSession = _uiState.value.trimEditor?.sessionPath
                 cancelThumbnailLoading()
+                editorBeforeCutProcessing = null
                 _uiState.update {
                     it.copy(
                         selectedVideos = videos,
@@ -203,7 +233,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     it.copy(error = error.message ?: error.javaClass.simpleName, status = "選択に失敗しました")
                 }
             } finally {
-                _uiState.update { it.copy(busy = false, progressPercent = null) }
+                _uiState.update {
+                    it.copy(busy = false, progressPercent = null, canCancelProcessing = false)
+                }
             }
         }
     }
@@ -326,11 +358,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         started.fold(
             onSuccess = {
-                if (pending.kind == PendingDestinationKind.CUT) cancelThumbnailLoading()
+                if (pending.kind == PendingDestinationKind.CUT) {
+                    editorBeforeCutProcessing = state.trimEditor
+                    cancelThumbnailLoading()
+                }
                 _uiState.update {
                     it.copy(
                         busy = true,
                         progressPercent = null,
+                        canCancelProcessing = true,
                         trimEditor = if (pending.kind == PendingDestinationKind.CUT) null else it.trimEditor,
                         pendingDestination = null,
                         status = "バックグラウンド処理を開始しました",
@@ -355,6 +391,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         requestConcatDestination(outputName)
     }
 
+    fun cancelProcessing() {
+        val state = _uiState.value
+        if (!state.busy || !state.canCancelProcessing) return
+        _uiState.update {
+            it.copy(
+                canCancelProcessing = false,
+                status = "キャンセルしています…",
+                error = null,
+            )
+        }
+        runCatching {
+            ClipForgeProcessingService.cancelProcessing(getApplication<Application>())
+        }.onFailure { error ->
+            _uiState.update {
+                it.copy(
+                    canCancelProcessing = true,
+                    status = "キャンセルできませんでした",
+                    error = error.message ?: error.javaClass.simpleName,
+                )
+            }
+        }
+    }
+
     fun openTrimEditor() {
         val selected = _uiState.value.selectedVideos
         if (selected.size != 1) {
@@ -370,6 +429,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             it.copy(
                 busy = true,
                 progressPercent = 0,
+                canCancelProcessing = true,
                 status = "編集画面を準備中",
                 error = null,
             )
@@ -380,6 +440,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     it.copy(
                         busy = false,
                         progressPercent = null,
+                        canCancelProcessing = false,
                         status = "編集画面を準備できませんでした",
                         error = error.message ?: error.javaClass.simpleName,
                     )
@@ -436,7 +497,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             editor.copy(startMs = position, endMs = duration)
         }
         _uiState.update {
-            it.copy(trimEditor = updated, status = "INを設定しました", error = null)
+            it.copy(trimEditor = updated, status = "開始位置を設定しました", error = null)
         }
     }
 
@@ -450,7 +511,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             editor.copy(startMs = 0L, endMs = position)
         }
         _uiState.update {
-            it.copy(trimEditor = updated, status = "OUTを設定しました", error = null)
+            it.copy(trimEditor = updated, status = "終了位置を設定しました", error = null)
         }
     }
 
@@ -514,6 +575,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 it.copy(
                     busy = true,
                     progressPercent = null,
+                    canCancelProcessing = false,
                     status = "削除位置をキーフレームに合わせています",
                     error = null,
                 )
@@ -552,7 +614,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
             } finally {
-                _uiState.update { it.copy(busy = false, progressPercent = null) }
+                _uiState.update {
+                    it.copy(busy = false, progressPercent = null, canCancelProcessing = false)
+                }
             }
         }
     }
@@ -591,10 +655,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (_uiState.value.busy) return
         val editor = _uiState.value.trimEditor ?: return
         cancelThumbnailLoading()
+        editorBeforeCutProcessing = null
         _uiState.update {
             it.copy(
                 trimEditor = null,
                 progressPercent = null,
+                canCancelProcessing = false,
                 status = "編集をキャンセルしました",
                 error = null,
             )
