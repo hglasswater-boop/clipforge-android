@@ -65,6 +65,7 @@ import androidx.media3.ui.PlayerView
 import app.clipforge.MainUiState
 import app.clipforge.MainViewModel
 import app.clipforge.TrimEditorState
+import app.clipforge.media.CutMode
 import app.clipforge.workflow.PickedVideo
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -339,6 +340,11 @@ private fun TrimEditorScreen(viewModel: MainViewModel, state: MainUiState, edito
                         verticalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         Text("削除する範囲", style = MaterialTheme.typography.titleMedium)
+                        CutModeSelector(
+                            editor = editor,
+                            enabled = !state.busy,
+                            onMode = viewModel::setCutMode,
+                        )
                         TrimRangeControls(viewModel, player, editor)
                         Row(
                             Modifier.fillMaxWidth(),
@@ -397,6 +403,14 @@ private fun TrimEditorScreen(viewModel: MainViewModel, state: MainUiState, edito
                         verticalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         Text("書き出し", style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            if (editor.cutMode == CutMode.SMART) {
+                                "正確カットで保存します。指定した境界の短い部分だけ再エンコードし、それ以外は無劣化コピーします。"
+                            } else {
+                                "完全無劣化で保存します。カット位置はキーフレームに合わせられます。"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                        )
                         OutlinedTextField(
                             value = outputName,
                             onValueChange = { outputName = it },
@@ -468,31 +482,24 @@ private fun EditorTransportControls(
                     style = MaterialTheme.typography.titleMedium,
                 )
             }
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                listOf(-10L, -5L, -1L).forEach { seconds ->
+            listOf(10L, 5L, 1L).forEach { seconds ->
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
                     OutlinedButton(
-                        onClick = { onSeekBy(seconds * 1_000L) },
+                        onClick = { onSeekBy(-seconds * 1_000L) },
                         enabled = enabled,
                         modifier = Modifier.weight(1f),
                     ) {
-                        Text("$seconds 秒")
+                        Text("◀ ${seconds}秒")
                     }
-                }
-            }
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                listOf(1L, 5L, 10L).forEach { seconds ->
                     OutlinedButton(
                         onClick = { onSeekBy(seconds * 1_000L) },
                         enabled = enabled,
                         modifier = Modifier.weight(1f),
                     ) {
-                        Text("+$seconds 秒")
+                        Text("${seconds}秒 ▶")
                     }
                 }
             }
@@ -535,7 +542,64 @@ private fun EditorTransportControls(
                 }
             }
             Text(
-                "秒移動は細かい位置合わせ、キーフレーム移動は無劣化カット位置の確認に使えます。",
+                "左が戻る、右が進むです。同じ秒数を同じ行に揃えています。キーフレーム移動は完全無劣化位置の確認にも使えます。",
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+    }
+}
+
+@Composable
+private fun CutModeSelector(
+    editor: TrimEditorState,
+    enabled: Boolean,
+    onMode: (CutMode) -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text("カット方式", style = MaterialTheme.typography.labelLarge)
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            if (editor.cutMode == CutMode.SMART) {
+                Button(
+                    onClick = { onMode(CutMode.SMART) },
+                    enabled = enabled,
+                    modifier = Modifier.weight(1f),
+                ) { Text("正確カット") }
+            } else {
+                OutlinedButton(
+                    onClick = { onMode(CutMode.SMART) },
+                    enabled = enabled && editor.cutRanges.isEmpty(),
+                    modifier = Modifier.weight(1f),
+                ) { Text("正確カット") }
+            }
+
+            if (editor.cutMode == CutMode.LOSSLESS) {
+                Button(
+                    onClick = { onMode(CutMode.LOSSLESS) },
+                    enabled = enabled,
+                    modifier = Modifier.weight(1f),
+                ) { Text("完全無劣化") }
+            } else {
+                OutlinedButton(
+                    onClick = { onMode(CutMode.LOSSLESS) },
+                    enabled = enabled && editor.cutRanges.isEmpty(),
+                    modifier = Modifier.weight(1f),
+                ) { Text("完全無劣化") }
+            }
+        }
+        Text(
+            if (editor.cutMode == CutMode.SMART) {
+                "標準。指定位置は動かしません。H.264 / H.265 はカット境界の短い部分だけ再エンコードします。"
+            } else {
+                "映像を一切再エンコードしません。その代わり開始・終了位置が近いキーフレームへ移動します。"
+            },
+            style = MaterialTheme.typography.bodySmall,
+        )
+        if (editor.cutRanges.isNotEmpty()) {
+            Text(
+                "方式を変更する場合は、削除リストをいったんすべて解除してください。",
                 style = MaterialTheme.typography.bodySmall,
             )
         }
@@ -555,6 +619,10 @@ private fun CutRangeList(
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Text("削除リスト", style = MaterialTheme.typography.titleMedium)
+            Text(
+                if (editor.cutMode == CutMode.SMART) "方式: 正確カット" else "方式: 完全無劣化",
+                style = MaterialTheme.typography.bodySmall,
+            )
             if (editor.cutRanges.isEmpty()) {
                 Text(
                     "まだ削除範囲はありません。開始位置と終了位置を決めて追加してください。",
