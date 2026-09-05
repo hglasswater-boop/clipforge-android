@@ -43,8 +43,12 @@ class ClipForgeProcessingService : Service() {
             ACTION_CUT -> "編集結果を保存中"
             else -> return START_NOT_STICKY
         }
-        updateProgress(title, "処理を準備しています")
-        startForeground(NOTIFICATION_ID, buildNotification(title, "処理を準備しています", true, null))
+        val initialPercent = if (request.action == ACTION_CUT) 0 else null
+        updateProgress(title, "処理を準備しています", initialPercent)
+        startForeground(
+            NOTIFICATION_ID,
+            buildNotification(title, "処理を準備しています", true, initialPercent),
+        )
         acquireWakeLock()
 
         processingJob = serviceScope.launch {
@@ -143,7 +147,7 @@ class ClipForgeProcessingService : Service() {
             cutRanges = cutRanges,
             outputUri = outputUri,
             outputName = outputName,
-        ) { message -> updateProgress(title, message) }
+        ) { message, percent -> updateProgress(title, message, percent) }
         finishSuccess("編集結果を保存しました")
     }
 
