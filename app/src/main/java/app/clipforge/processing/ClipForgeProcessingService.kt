@@ -129,8 +129,8 @@ class ClipForgeProcessingService : Service() {
         val outputUri = requireNotNull(request.getStringExtra(EXTRA_OUTPUT_URI))
         val outputName = requireNotNull(request.getStringExtra(EXTRA_OUTPUT_NAME))
         val durationMs = request.getLongExtra(EXTRA_DURATION_MS, -1L)
-        val starts = request.getLongArrayExtra(EXTRA_CUT_STARTS).orEmpty()
-        val ends = request.getLongArrayExtra(EXTRA_CUT_ENDS).orEmpty()
+        val starts = request.getLongArrayExtra(EXTRA_CUT_STARTS) ?: longArrayOf()
+        val ends = request.getLongArrayExtra(EXTRA_CUT_ENDS) ?: longArrayOf()
         require(durationMs > 0L) { "動画の長さが不正です" }
         require(starts.isNotEmpty() && starts.size == ends.size) { "削除する範囲がありません" }
         val cutRanges = starts.indices.map { index -> MediaSegment(starts[index], ends[index]) }
