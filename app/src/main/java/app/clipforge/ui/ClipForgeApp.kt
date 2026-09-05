@@ -174,6 +174,9 @@ private fun HomeScreen(
                 Text("ClipForge", style = MaterialTheme.typography.headlineMedium)
                 Text("動画探しはファイラーに任せて、ClipForgeは無劣化の結合・カットだけ担当します。")
             }
+            if (state.busy) {
+                item { StatusArea(state, viewModel::cancelProcessing) }
+            }
             item {
                 Card(Modifier.fillMaxWidth()) {
                     Column(
@@ -210,7 +213,9 @@ private fun HomeScreen(
                     )
                 }
             }
-            item { StatusArea(state) }
+            if (!state.busy) {
+                item { StatusArea(state, viewModel::cancelProcessing) }
+            }
         }
     }
 }
@@ -292,6 +297,9 @@ private fun TrimEditorScreen(viewModel: MainViewModel, state: MainUiState, edito
                 Spacer(Modifier.height(8.dp))
                 Text("カット編集", style = MaterialTheme.typography.headlineMedium)
                 Text(editor.sourceName, style = MaterialTheme.typography.titleMedium)
+            }
+            if (state.busy) {
+                item { StatusArea(state, viewModel::cancelProcessing) }
             }
             item {
                 AndroidView(
@@ -425,7 +433,9 @@ private fun TrimEditorScreen(viewModel: MainViewModel, state: MainUiState, edito
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
-            item { StatusArea(state) }
+            if (!state.busy) {
+                item { StatusArea(state, viewModel::cancelProcessing) }
+            }
         }
     }
 }
@@ -460,15 +470,29 @@ private fun EditorTransportControls(
             }
             Row(
                 Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                listOf(-10L, -5L, -1L, 1L, 5L, 10L).forEach { seconds ->
+                listOf(-10L, -5L, -1L).forEach { seconds ->
                     OutlinedButton(
                         onClick = { onSeekBy(seconds * 1_000L) },
                         enabled = enabled,
                         modifier = Modifier.weight(1f),
                     ) {
-                        Text(if (seconds > 0) "+$seconds" else "$seconds")
+                        Text("$seconds 秒")
+                    }
+                }
+            }
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                listOf(1L, 5L, 10L).forEach { seconds ->
+                    OutlinedButton(
+                        onClick = { onSeekBy(seconds * 1_000L) },
+                        enabled = enabled,
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text("+$seconds 秒")
                     }
                 }
             }
@@ -481,14 +505,14 @@ private fun EditorTransportControls(
                     enabled = enabled && !keyframeNavigationBusy,
                     modifier = Modifier.weight(1f),
                 ) {
-                    Text("◀ 前K")
+                    Text("前のキーフレーム")
                 }
                 OutlinedButton(
                     onClick = onNextKeyframe,
                     enabled = enabled && !keyframeNavigationBusy,
                     modifier = Modifier.weight(1f),
                 ) {
-                    Text("次K ▶")
+                    Text("次のキーフレーム")
                 }
             }
             Row(
@@ -511,7 +535,7 @@ private fun EditorTransportControls(
                 }
             }
             Text(
-                "±1 / 5 / 10 は秒移動、前K / 次K は前後のキーフレームへ移動します。",
+                "秒移動は細かい位置合わせ、キーフレーム移動は無劣化カット位置の確認に使えます。",
                 style = MaterialTheme.typography.bodySmall,
             )
         }
@@ -758,6 +782,12 @@ private fun TrimRangeControls(viewModel: MainViewModel, player: ExoPlayer, edito
                 player.seekTo(targetMs)
             },
         )
+        if (editor.thumbnailPaths.isNotEmpty()) {
+            Text(
+                "サムネイルをタップすると、その位置へ移動します。",
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
         RangeSlider(
             value = startFraction..endFraction,
             onValueChange = { range ->
@@ -823,23 +853,54 @@ private fun TimelineThumbnailStrip(
 }
 
 @Composable
-private fun StatusArea(state: MainUiState) {
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        if (state.busy) {
-            val percent = state.progressPercent
-            if (percent != null) {
-                LinearProgressIndicator(
-                    progress = { percent / 100f },
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                Text("$percent%", style = MaterialTheme.typography.bodySmall)
-            } else {
-                LinearProgressIndicator(Modifier.fillMaxWidth())
+private fun StatusArea(
+    state: MainUiState,
+    onCancelProcessing: () -> Unit,
+) {
+    if (state.busy) {
+        Card(Modifier.fillMaxWidth()) {
+            Column(
+                Modifier.padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("処理中", style = MaterialTheme.typography.titleMedium)
+                    state.progressPercent?.let { percent ->
+                        Text("$percent%", style = MaterialTheme.typography.titleMedium)
+                    }
+                }
+                val percent = state.progressPercent
+                if (percent != null) {
+                    LinearProgressIndicator(
+                        progress = { percent / 100f },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                } else {
+                    LinearProgressIndicator(Modifier.fillMaxWidth())
+                }
+                Text(state.status, style = MaterialTheme.typography.bodyMedium)
+                if (state.canCancelProcessing) {
+                    OutlinedButton(
+                        onClick = onCancelProcessing,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("処理をキャンセル")
+                    }
+                } else if (state.status.startsWith("キャンセル")) {
+                    Text("停止処理が完了するまで操作は無効です。", style = MaterialTheme.typography.bodySmall)
+                }
             }
         }
-        Text(state.status, style = MaterialTheme.typography.bodyMedium)
-        state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-        Spacer(Modifier.height(24.dp))
+    } else {
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(state.status, style = MaterialTheme.typography.bodyMedium)
+            state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            Spacer(Modifier.height(24.dp))
+        }
     }
 }
 
