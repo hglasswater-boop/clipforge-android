@@ -50,15 +50,18 @@ object ProcessingStateStore {
         localPath: String?,
         durationMs: Long,
         thumbnailPaths: List<String>,
+        persistActiveSession: Boolean = true,
     ) {
-        ActiveCutSessionStore.prepared(
-            sourceUri = sourceUri,
-            sourceName = sourceName,
-            sessionPath = sessionPath,
-            localPath = localPath,
-            durationMs = durationMs,
-            thumbnailPaths = thumbnailPaths,
-        )
+        if (persistActiveSession) {
+            ActiveCutSessionStore.prepared(
+                sourceUri = sourceUri,
+                sourceName = sourceName,
+                sessionPath = sessionPath,
+                localPath = localPath,
+                durationMs = durationMs,
+                thumbnailPaths = thumbnailPaths,
+            )
+        }
         _state.value = ProcessingState.CutPrepared(
             sourceUri = sourceUri,
             sourceName = sourceName,
