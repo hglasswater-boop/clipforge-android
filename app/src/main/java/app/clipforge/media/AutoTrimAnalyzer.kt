@@ -168,7 +168,7 @@ class AutoTrimAnalyzer(context: Context) {
         }
         .maxByOrNull(KnownClipMatch::similarity)
 
-    private fun detectScenes(
+    private suspend fun detectScenes(
         sourceUri: String,
         localInputPath: String?,
         durationMs: Long,
@@ -195,7 +195,7 @@ class AutoTrimAnalyzer(context: Context) {
         SceneDetectionResult(emptyList(), range.startMs, range.endMs)
     }
 
-    private fun detectAudio(
+    private suspend fun detectAudio(
         sourceUri: String,
         localInputPath: String?,
         durationMs: Long,
@@ -396,8 +396,8 @@ private fun parseAudioLog(log: String, offsetMs: Long, endMs: Long): AudioFeatur
         rmsRegex.find(line)?.groupValues?.getOrNull(1)?.let { raw ->
             val rms = raw.toDoubleOrNull()
             val pts = currentPtsSeconds
-            if (rms != null && rms.isFinite() && pts != null && pts!!.isFinite()) {
-                val absoluteMs = offsetMs + (pts!! * 1_000.0).roundToLong()
+            if (rms != null && rms.isFinite() && pts != null && pts.isFinite()) {
+                val absoluteMs = offsetMs + (pts * 1_000.0).roundToLong()
                 if (absoluteMs <= endMs) samples += AudioFeatureSample(absoluteMs, rms)
             }
         }
