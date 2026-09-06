@@ -1,6 +1,5 @@
 package app.clipforge.media
 
-import com.arthenica.ffmpegkit.FFmpegKit
 import com.arthenica.ffmpegkit.ReturnCode
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -85,7 +84,7 @@ class SceneChangeDetector {
         )
     }
 
-    private fun detect(
+    private suspend fun detect(
         inputArguments: List<String>,
         durationMs: Long,
         startMs: Long,
@@ -114,7 +113,7 @@ class SceneChangeDetector {
             "-f", "null",
             "-",
         )
-        val session = FFmpegKit.executeWithArguments(arguments.toTypedArray())
+        val session = executeCancellableFfmpeg(arguments)
         if (!ReturnCode.isSuccess(session.returnCode)) {
             throw MediaCommandException(
                 session.allLogsAsString.ifBlank { "シーン候補の解析に失敗しました" },
