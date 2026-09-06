@@ -77,6 +77,8 @@ import app.clipforge.MainViewModel
 import app.clipforge.TrimEditorState
 import app.clipforge.media.CutMode
 import app.clipforge.media.MediaSegment
+import app.clipforge.media.SceneMarker
+import app.clipforge.media.SceneMarkerKind
 import app.clipforge.workflow.PickedVideo
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -282,7 +284,7 @@ private fun TrimEditorScreen(viewModel: MainViewModel, state: MainUiState, edito
     }
 
     fun jumpKeyframe(forward: Boolean) {
-        if (keyframeNavigationBusy) return
+        if (keyframeNavigationBusy || state.sceneSearchBusy) return
         keyframeNavigationBusy = true
         scope.launch {
             try {
@@ -294,6 +296,18 @@ private fun TrimEditorScreen(viewModel: MainViewModel, state: MainUiState, edito
                 }
             } finally {
                 keyframeNavigationBusy = false
+            }
+        }
+    }
+
+    fun jumpSceneCandidate(kind: SceneMarkerKind, forward: Boolean) {
+        if (keyframeNavigationBusy || state.sceneSearchBusy) return
+        scope.launch {
+            val target = viewModel.adjacentSceneMarker(player.currentPosition, forward, kind)
+            if (target != null) {
+                player.pause()
+                player.seekTo(target)
+                playheadMs = target
             }
         }
     }
@@ -391,9 +405,16 @@ private fun TrimEditorScreen(viewModel: MainViewModel, state: MainUiState, edito
                     durationMs = editor.durationMs,
                     enabled = !state.busy,
                     keyframeNavigationBusy = keyframeNavigationBusy,
+                    sceneNavigationBusy = state.sceneSearchBusy,
+                    sceneMarkerCount = state.sceneMarkers.count { it.kind == SceneMarkerKind.SCENE_CHANGE },
+                    blackMarkerCount = state.sceneMarkers.count { it.kind == SceneMarkerKind.BLACK },
                     onSeekBy = ::seekBy,
                     onPreviousKeyframe = { jumpKeyframe(false) },
                     onNextKeyframe = { jumpKeyframe(true) },
+                    onPreviousScene = { jumpSceneCandidate(SceneMarkerKind.SCENE_CHANGE, false) },
+                    onNextScene = { jumpSceneCandidate(SceneMarkerKind.SCENE_CHANGE, true) },
+                    onPreviousBlack = { jumpSceneCandidate(SceneMarkerKind.BLACK, false) },
+                    onNextBlack = { jumpSceneCandidate(SceneMarkerKind.BLACK, true) },
                     onSetIn = {
                         player.pause()
                         viewModel.setTrimStartAt(player.currentPosition)
@@ -421,6 +442,7 @@ private fun TrimEditorScreen(viewModel: MainViewModel, state: MainUiState, edito
                             player = player,
                             editor = editor,
                             playheadMs = playheadMs,
+                            sceneMarkers = state.sceneMarkers,
                         )
                         Row(
                             Modifier.fillMaxWidth(),
@@ -559,9 +581,16 @@ private fun EditorTransportControls(
     durationMs: Long,
     enabled: Boolean,
     keyframeNavigationBusy: Boolean,
+    sceneNavigationBusy: Boolean,
+    sceneMarkerCount: Int,
+    blackMarkerCount: Int,
     onSeekBy: (Long) -> Unit,
     onPreviousKeyframe: () -> Unit,
     onNextKeyframe: () -> Unit,
+    onPreviousScene: () -> Unit,
+    onNextScene: () -> Unit,
+    onPreviousBlack: () -> Unit,
+    onNextBlack: () -> Unit,
     onSetIn: () -> Unit,
     onSetOut: () -> Unit,
 ) {
@@ -608,18 +637,52 @@ private fun EditorTransportControls(
             ) {
                 OutlinedButton(
                     onClick = onPreviousKeyframe,
-                    enabled = enabled && !keyframeNavigationBusy,
+                    enabled = enabled && !keyframeNavigationBusy && !sceneNavigationBusy,
                     modifier = Modifier.weight(1f),
-                ) {
-                    Text("前のキーフレーム")
-                }
+                ) { Text("前のキーフレーム") }
                 OutlinedButton(
                     onClick = onNextKeyframe,
-                    enabled = enabled && !keyframeNavigationBusy,
+                    enabled = enabled && !keyframeNavigationBusy && !sceneNavigationBusy,
                     modifier = Modifier.weight(1f),
-                ) {
-                    Text("次のキーフレーム")
-                }
+                ) { Text("次のキーフレーム") }
+            }
+            Text(
+                "カット候補  シーン $sceneMarkerCount / 黒画面 $blackMarkerCount",
+                style = MaterialTheme.typography.labelLarge,
+            )
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                OutlinedButton(
+                    onClick = onPreviousScene,
+                    enabled = enabled && !keyframeNavigationBusy && !sceneNavigationBusy,
+                    modifier = Modifier.weight(1f),
+                ) { Text("◀ 前のシーン") }
+                OutlinedButton(
+                    onClick = onNextScene,
+                    enabled = enabled && !keyframeNavigationBusy && !sceneNavigationBusy,
+                    modifier = Modifier.weight(1f),
+                ) { Text("次のシーン ▶") }
+            }
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                OutlinedButton(
+                    onClick = onPreviousBlack,
+                    enabled = enabled && !keyframeNavigationBusy && !sceneNavigationBusy,
+                    modifier = Modifier.weight(1f),
+                ) { Text("◀ 前の黒画面") }
+                OutlinedButton(
+                    onClick = onNextBlack,
+                    enabled = enabled && !keyframeNavigationBusy && !sceneNavigationBusy,
+                    modifier = Modifier.weight(1f),
+                ) { Text("次の黒画面 ▶") }
+            }
+            if (sceneNavigationBusy) {
+                LinearProgressIndicator(Modifier.fillMaxWidth())
+                Text("周辺だけ解析して候補を蓄積しています", style = MaterialTheme.typography.bodySmall)
             }
             Row(
                 Modifier.fillMaxWidth(),
@@ -930,6 +993,7 @@ private fun TrimRangeControls(
     player: ExoPlayer,
     editor: TrimEditorState,
     playheadMs: Long,
+    sceneMarkers: List<SceneMarker>,
 ) {
     val duration = editor.durationMs.coerceAtLeast(1L)
     val startFraction = (editor.startMs.toDouble() / duration).toFloat().coerceIn(0f, 1f)
@@ -943,13 +1007,14 @@ private fun TrimRangeControls(
             selectionStartMs = editor.startMs,
             selectionEndMs = editor.endMs,
             cutRanges = editor.cutRanges,
+            sceneMarkers = sceneMarkers,
             onSeek = { targetMs ->
                 player.pause()
                 player.seekTo(targetMs)
             },
         )
         Text(
-            "削除範囲は塗りつぶし、選択範囲は両端線、現在位置は中央線で表示します。",
+            "削除範囲は塗りつぶし、選択範囲は両端線、現在位置は中央線。蓄積したシーン/黒画面候補も細線で残します。",
             style = MaterialTheme.typography.bodySmall,
         )
         RangeSlider(
@@ -986,6 +1051,7 @@ private fun TimelineThumbnailStrip(
     selectionStartMs: Long,
     selectionEndMs: Long,
     cutRanges: List<MediaSegment>,
+    sceneMarkers: List<SceneMarker>,
     onSeek: (Long) -> Unit,
 ) {
     val slots = if (paths.isEmpty()) List(8) { "" } else paths
@@ -993,6 +1059,8 @@ private fun TimelineThumbnailStrip(
     val cutColor = MaterialTheme.colorScheme.error.copy(alpha = 0.34f)
     val selectionColor = MaterialTheme.colorScheme.primary
     val playheadColor = MaterialTheme.colorScheme.onSurface
+    val sceneColor = MaterialTheme.colorScheme.tertiary
+    val blackColor = MaterialTheme.colorScheme.outline
 
     Box(
         modifier = Modifier
@@ -1047,6 +1115,16 @@ private fun TimelineThumbnailStrip(
                     color = cutColor,
                     topLeft = Offset(left, 0f),
                     size = Size((right - left).coerceAtLeast(1f), size.height),
+                )
+            }
+
+            sceneMarkers.forEach { marker ->
+                val markerX = xFor(marker.timeMs)
+                drawLine(
+                    color = if (marker.kind == SceneMarkerKind.SCENE_CHANGE) sceneColor else blackColor,
+                    start = Offset(markerX, 0f),
+                    end = Offset(markerX, size.height),
+                    strokeWidth = 2f,
                 )
             }
 

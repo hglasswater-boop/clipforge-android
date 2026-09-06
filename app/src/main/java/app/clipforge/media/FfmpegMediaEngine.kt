@@ -184,6 +184,39 @@ private fun formatDimensions(stream: StreamSignature): String =
 internal fun MediaSignature.playbackVideoStreams(): List<StreamSignature> =
     streams.filter { it.type == "video" && !it.attachedPic }
 
+internal fun MediaSignature.hasAttachedPicture(): Boolean =
+    streams.any { it.type == "video" && it.attachedPic }
+
+/**
+ * Maps streams in their original order while sourcing attached pictures from a separate, unseeked
+ * input. This is required because an input-level `-ss` or ffconcat `inpoint` can seek past the
+ * single attached-picture packet even when `-map 0 -c copy` is used.
+ */
+internal fun preservedStreamMapArguments(
+    signature: MediaSignature,
+    primaryInputIndex: Int,
+    jacketInputIndex: Int?,
+): List<String> {
+    if (!signature.hasAttachedPicture() || jacketInputIndex == null) {
+        return listOf("-map", primaryInputIndex.toString())
+    }
+    return buildList {
+        var videoOrdinal = 0
+        signature.streams.forEachIndexed { streamIndex, stream ->
+            add("-map")
+            val inputIndex = if (stream.attachedPic) jacketInputIndex else primaryInputIndex
+            add("$inputIndex:$streamIndex")
+            if (stream.type == "video") {
+                if (stream.attachedPic) {
+                    add("-disposition:v:$videoOrdinal")
+                    add("attached_pic")
+                }
+                videoOrdinal += 1
+            }
+        }
+    }
+}
+
 class FfmpegMediaEngine {
 
     suspend fun probe(file: File): MediaSignature = probePath(file.absolutePath, file.name)
@@ -308,17 +341,24 @@ class FfmpegMediaEngine {
         require(startMs >= 0) { "startMs must be >= 0" }
         require(endMs == null || endMs > startMs) { "endMs must be greater than startMs" }
 
+        val sourceSignature = probePath(inputPath)
+        val hasJacket = sourceSignature.hasAttachedPicture()
         val args = mutableListOf(
             "-hide_banner", "-y",
             "-noaccurate_seek",
             "-ss", seconds(startMs),
             "-i", inputPath,
         )
+        if (hasJacket) args += listOf("-i", inputPath)
         endMs?.let { end ->
             args += listOf("-t", seconds(end - startMs))
         }
+        args += preservedStreamMapArguments(
+            signature = sourceSignature,
+            primaryInputIndex = 0,
+            jacketInputIndex = if (hasJacket) 1 else null,
+        )
         args += listOf(
-            "-map", "0",
             "-c", "copy",
             "-avoid_negative_ts", "make_zero",
             "-f", muxerFor(outputName),
@@ -338,17 +378,24 @@ class FfmpegMediaEngine {
         require(startMs >= 0) { "startMs must be >= 0" }
         require(endMs == null || endMs > startMs) { "endMs must be greater than startMs" }
 
+        val sourceSignature = probePath(inputPath)
+        val hasJacket = sourceSignature.hasAttachedPicture()
         val args = mutableListOf(
             "-hide_banner", "-y",
             "-noaccurate_seek",
             "-ss", seconds(startMs),
             "-i", inputPath,
         )
+        if (hasJacket) args += listOf("-i", inputPath)
         endMs?.let { end ->
             args += listOf("-t", seconds(end - startMs))
         }
+        args += preservedStreamMapArguments(
+            signature = sourceSignature,
+            primaryInputIndex = 0,
+            jacketInputIndex = if (hasJacket) 1 else null,
+        )
         args += listOf(
-            "-map", "0",
             "-c", "copy",
             "-avoid_negative_ts", "make_zero",
             "-f", muxerFor(outputName),
@@ -372,10 +419,14 @@ class FfmpegMediaEngine {
         outputName: String,
         startMs: Long,
         endMs: Long?,
+        sourceSignature: MediaSignature,
+        jacketFd: Int? = null,
         onProgressPercent: (Int) -> Unit = {},
     ) = withContext(Dispatchers.IO) {
         require(startMs >= 0) { "startMs must be >= 0" }
         require(endMs == null || endMs > startMs) { "endMs must be greater than startMs" }
+        val hasJacket = sourceSignature.hasAttachedPicture()
+        if (hasJacket) require(jacketFd != null) { "Attached picture requires an independent source fd" }
 
         val args = mutableListOf(
             "-hide_banner", "-y",
@@ -384,11 +435,18 @@ class FfmpegMediaEngine {
             "-fd", inputFd.toString(),
             "-i", "fd:",
         )
+        if (hasJacket) {
+            args += listOf("-fd", requireNotNull(jacketFd).toString(), "-i", "fd:")
+        }
         endMs?.let { end ->
             args += listOf("-t", seconds(end - startMs))
         }
+        args += preservedStreamMapArguments(
+            signature = sourceSignature,
+            primaryInputIndex = 0,
+            jacketInputIndex = if (hasJacket) 1 else null,
+        )
         args += listOf(
-            "-map", "0",
             "-c", "copy",
             "-avoid_negative_ts", "make_zero",
             "-f", muxerFor(outputName),
@@ -416,6 +474,7 @@ class FfmpegMediaEngine {
     ) = withContext(Dispatchers.IO) {
         renderSmartBoundary(
             inputArguments = listOf("-i", inputPath),
+            jacketInputArguments = if (sourceSignature.hasAttachedPicture()) listOf("-i", inputPath) else null,
             output = output,
             sourceSignature = sourceSignature,
             segment = segment,
@@ -428,10 +487,15 @@ class FfmpegMediaEngine {
         output: File,
         sourceSignature: MediaSignature,
         segment: MediaSegment,
+        jacketFd: Int? = null,
         onProgressPercent: (Int) -> Unit = {},
     ) = withContext(Dispatchers.IO) {
+        if (sourceSignature.hasAttachedPicture()) {
+            require(jacketFd != null) { "Attached picture requires an independent source fd" }
+        }
         renderSmartBoundary(
             inputArguments = listOf("-fd", inputFd.toString(), "-i", "fd:"),
+            jacketInputArguments = jacketFd?.let { listOf("-fd", it.toString(), "-i", "fd:") },
             output = output,
             sourceSignature = sourceSignature,
             segment = segment,
@@ -441,6 +505,7 @@ class FfmpegMediaEngine {
 
     private suspend fun renderSmartBoundary(
         inputArguments: List<String>,
+        jacketInputArguments: List<String>?,
         output: File,
         sourceSignature: MediaSignature,
         segment: MediaSegment,
@@ -449,6 +514,9 @@ class FfmpegMediaEngine {
         val videoStreams = sourceSignature.playbackVideoStreams()
         require(videoStreams.size == 1) {
             "正確カットは映像トラックが1本の動画に対応しています。完全無劣化モードを使用してください"
+        }
+        if (sourceSignature.hasAttachedPicture()) {
+            require(jacketInputArguments != null) { "Attached picture source is required" }
         }
         val video = videoStreams.single()
         val encoder = when (video.codec) {
@@ -465,10 +533,14 @@ class FfmpegMediaEngine {
             "-ss", seconds(segment.startMs),
         )
         args += inputArguments
-        // `V` excludes attached pictures; `-map 0` still copies the jacket unchanged.
+        jacketInputArguments?.let(args::addAll)
+        args += listOf("-t", seconds(segment.durationMs))
+        args += preservedStreamMapArguments(
+            signature = sourceSignature,
+            primaryInputIndex = 0,
+            jacketInputIndex = if (jacketInputArguments != null) 1 else null,
+        )
         args += listOf(
-            "-t", seconds(segment.durationMs),
-            "-map", "0",
             "-c", "copy",
             "-c:V:0", encoder,
             "-b:V:0", smartBoundaryBitrate(video, video.codec).toString(),
@@ -502,12 +574,15 @@ class FfmpegMediaEngine {
         outputName: String,
         parts: List<SmartConcatInput>,
         expectedDurationMs: Long,
+        sourceSignature: MediaSignature,
         workingDirectory: File,
         onProgressPercent: (Int) -> Unit = {},
     ) = withContext(Dispatchers.IO) {
         concatSmartParts(
             script = pathSmartConcatScript(inputPath, parts),
             usesFdSource = false,
+            jacketInputArguments = if (sourceSignature.hasAttachedPicture()) listOf("-i", inputPath) else null,
+            sourceSignature = sourceSignature,
             outputFd = outputFd,
             outputName = outputName,
             expectedDurationMs = expectedDurationMs,
@@ -522,12 +597,19 @@ class FfmpegMediaEngine {
         outputName: String,
         parts: List<SmartConcatInput>,
         expectedDurationMs: Long,
+        sourceSignature: MediaSignature,
+        jacketFd: Int? = null,
         workingDirectory: File,
         onProgressPercent: (Int) -> Unit = {},
     ) = withContext(Dispatchers.IO) {
+        if (sourceSignature.hasAttachedPicture()) {
+            require(jacketFd != null) { "Attached picture requires an independent source fd" }
+        }
         concatSmartParts(
             script = fdSmartConcatScript(inputFds, parts),
-            usesFdSource = inputFds.isNotEmpty(),
+            usesFdSource = inputFds.isNotEmpty() || jacketFd != null,
+            jacketInputArguments = jacketFd?.let { listOf("-fd", it.toString(), "-i", "fd:") },
+            sourceSignature = sourceSignature,
             outputFd = outputFd,
             outputName = outputName,
             expectedDurationMs = expectedDurationMs,
@@ -539,6 +621,8 @@ class FfmpegMediaEngine {
     private suspend fun concatSmartParts(
         script: String,
         usesFdSource: Boolean,
+        jacketInputArguments: List<String>?,
+        sourceSignature: MediaSignature,
         outputFd: Int,
         outputName: String,
         expectedDurationMs: Long,
@@ -559,7 +643,14 @@ class FfmpegMediaEngine {
                 "-safe", "0",
                 "-auto_convert", "1",
                 "-i", listFile.absolutePath,
-                "-map", "0",
+            )
+            jacketInputArguments?.let(args::addAll)
+            args += preservedStreamMapArguments(
+                signature = sourceSignature,
+                primaryInputIndex = 0,
+                jacketInputIndex = if (jacketInputArguments != null) 1 else null,
+            )
+            args += listOf(
                 "-c", "copy",
                 "-fflags", "+genpts",
                 "-avoid_negative_ts", "make_zero",
@@ -590,25 +681,35 @@ class FfmpegMediaEngine {
         onProgressPercent: (Int) -> Unit = {},
     ) = withContext(Dispatchers.IO) {
         require(segments.size >= 2) { "At least two segments are required" }
+        val sourceSignature = probePath(inputPath)
+        val hasJacket = sourceSignature.hasAttachedPicture()
         workingDirectory.mkdirs()
         val listFile = File(workingDirectory, ".clipforge-segments-${System.nanoTime()}.ffconcat")
         try {
             listFile.writeText(pathSegmentConcatScript(inputPath, segments))
+            val args = mutableListOf(
+                "-hide_banner", "-y",
+                "-f", "concat",
+                "-safe", "0",
+                "-auto_convert", "1",
+                "-i", listFile.absolutePath,
+            )
+            if (hasJacket) args += listOf("-i", inputPath)
+            args += preservedStreamMapArguments(
+                signature = sourceSignature,
+                primaryInputIndex = 0,
+                jacketInputIndex = if (hasJacket) 1 else null,
+            )
+            args += listOf(
+                "-c", "copy",
+                "-fflags", "+genpts",
+                "-avoid_negative_ts", "make_zero",
+                "-f", muxerFor(outputName),
+                "-fd", outputFd.toString(),
+                "fd:",
+            )
             runFfmpeg(
-                arguments = listOf(
-                    "-hide_banner", "-y",
-                    "-f", "concat",
-                    "-safe", "0",
-                    "-auto_convert", "1",
-                    "-i", listFile.absolutePath,
-                    "-map", "0",
-                    "-c", "copy",
-                    "-fflags", "+genpts",
-                    "-avoid_negative_ts", "make_zero",
-                    "-f", muxerFor(outputName),
-                    "-fd", outputFd.toString(),
-                    "fd:",
-                ),
+                arguments = args,
                 expectedDurationMs = segments.sumOf(MediaSegment::durationMs),
                 onProgressPercent = onProgressPercent,
             )
@@ -623,31 +724,45 @@ class FfmpegMediaEngine {
         outputFd: Int,
         outputName: String,
         segments: List<MediaSegment>,
+        sourceSignature: MediaSignature,
+        jacketFd: Int? = null,
         workingDirectory: File,
         onProgressPercent: (Int) -> Unit = {},
     ) = withContext(Dispatchers.IO) {
         require(segments.size >= 2) { "At least two segments are required" }
         require(inputFds.size == segments.size) { "Each source segment needs an independent fd" }
+        val hasJacket = sourceSignature.hasAttachedPicture()
+        if (hasJacket) require(jacketFd != null) { "Attached picture requires an independent source fd" }
         workingDirectory.mkdirs()
         val listFile = File(workingDirectory, ".clipforge-segments-${System.nanoTime()}.ffconcat")
         try {
             listFile.writeText(fdSegmentConcatScript(inputFds, segments))
+            val args = mutableListOf(
+                "-hide_banner", "-y",
+                "-protocol_whitelist", "file,fd,crypto,data",
+                "-f", "concat",
+                "-safe", "0",
+                "-auto_convert", "1",
+                "-i", listFile.absolutePath,
+            )
+            if (hasJacket) {
+                args += listOf("-fd", requireNotNull(jacketFd).toString(), "-i", "fd:")
+            }
+            args += preservedStreamMapArguments(
+                signature = sourceSignature,
+                primaryInputIndex = 0,
+                jacketInputIndex = if (hasJacket) 1 else null,
+            )
+            args += listOf(
+                "-c", "copy",
+                "-fflags", "+genpts",
+                "-avoid_negative_ts", "make_zero",
+                "-f", muxerFor(outputName),
+                "-fd", outputFd.toString(),
+                "fd:",
+            )
             runFfmpeg(
-                arguments = listOf(
-                    "-hide_banner", "-y",
-                    "-protocol_whitelist", "file,fd,crypto,data",
-                    "-f", "concat",
-                    "-safe", "0",
-                    "-auto_convert", "1",
-                    "-i", listFile.absolutePath,
-                    "-map", "0",
-                    "-c", "copy",
-                    "-fflags", "+genpts",
-                    "-avoid_negative_ts", "make_zero",
-                    "-f", muxerFor(outputName),
-                    "-fd", outputFd.toString(),
-                    "fd:",
-                ),
+                arguments = args,
                 expectedDurationMs = segments.sumOf(MediaSegment::durationMs),
                 onProgressPercent = onProgressPercent,
             )
@@ -716,24 +831,32 @@ class FfmpegMediaEngine {
         workingDirectory: File,
     ) = withContext(Dispatchers.IO) {
         require(inputs.size >= 2) { "At least two files are required" }
+        val sourceSignature = probePath(inputs.first().path, inputs.first().displayName)
+        val hasJacket = sourceSignature.hasAttachedPicture()
         workingDirectory.mkdirs()
         val listFile = File(workingDirectory, ".clipforge-concat-${System.nanoTime()}.txt")
         try {
             listFile.writeText(inputs.joinToString("\n") { "file '${escapeConcatPath(it.path)}'" })
-            runFfmpeg(
-                listOf(
-                    "-hide_banner", "-y",
-                    "-f", "concat",
-                    "-safe", "0",
-                    "-auto_convert", "1",
-                    "-i", listFile.absolutePath,
-                    "-map", "0",
-                    "-c", "copy",
-                    "-fflags", "+genpts",
-                    "-f", muxerFor(outputName),
-                    outputPath,
-                ),
+            val args = mutableListOf(
+                "-hide_banner", "-y",
+                "-f", "concat",
+                "-safe", "0",
+                "-auto_convert", "1",
+                "-i", listFile.absolutePath,
             )
+            if (hasJacket) args += listOf("-i", inputs.first().path)
+            args += preservedStreamMapArguments(
+                signature = sourceSignature,
+                primaryInputIndex = 0,
+                jacketInputIndex = if (hasJacket) 1 else null,
+            )
+            args += listOf(
+                "-c", "copy",
+                "-fflags", "+genpts",
+                "-f", muxerFor(outputName),
+                outputPath,
+            )
+            runFfmpeg(args)
         } finally {
             listFile.delete()
         }
@@ -749,29 +872,41 @@ class FfmpegMediaEngine {
         inputs: List<NamedMediaDescriptor>,
         outputFd: Int,
         outputName: String,
+        sourceSignature: MediaSignature,
+        jacketFd: Int? = null,
         workingDirectory: File,
     ) = withContext(Dispatchers.IO) {
         require(inputs.size >= 2) { "At least two files are required" }
+        val hasJacket = sourceSignature.hasAttachedPicture()
+        if (hasJacket) require(jacketFd != null) { "Attached picture requires an independent source fd" }
         workingDirectory.mkdirs()
         val listFile = File(workingDirectory, ".clipforge-concat-${System.nanoTime()}.ffconcat")
         try {
             listFile.writeText(fdConcatScript(inputs))
-            runFfmpeg(
-                listOf(
-                    "-hide_banner", "-y",
-                    "-protocol_whitelist", "file,fd,crypto,data",
-                    "-f", "concat",
-                    "-safe", "0",
-                    "-auto_convert", "1",
-                    "-i", listFile.absolutePath,
-                    "-map", "0",
-                    "-c", "copy",
-                    "-fflags", "+genpts",
-                    "-f", muxerFor(outputName),
-                    "-fd", outputFd.toString(),
-                    "fd:",
-                ),
+            val args = mutableListOf(
+                "-hide_banner", "-y",
+                "-protocol_whitelist", "file,fd,crypto,data",
+                "-f", "concat",
+                "-safe", "0",
+                "-auto_convert", "1",
+                "-i", listFile.absolutePath,
             )
+            if (hasJacket) {
+                args += listOf("-fd", requireNotNull(jacketFd).toString(), "-i", "fd:")
+            }
+            args += preservedStreamMapArguments(
+                signature = sourceSignature,
+                primaryInputIndex = 0,
+                jacketInputIndex = if (hasJacket) 1 else null,
+            )
+            args += listOf(
+                "-c", "copy",
+                "-fflags", "+genpts",
+                "-f", muxerFor(outputName),
+                "-fd", outputFd.toString(),
+                "fd:",
+            )
+            runFfmpeg(args)
         } finally {
             listFile.delete()
         }

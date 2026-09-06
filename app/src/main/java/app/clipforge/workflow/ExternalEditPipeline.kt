@@ -12,6 +12,7 @@ import app.clipforge.media.NamedMediaDescriptor
 import app.clipforge.media.NamedMediaSignature
 import app.clipforge.media.SyncFrameResolver
 import app.clipforge.media.TimelineThumbnailGenerator
+import app.clipforge.media.hasAttachedPicture
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -115,9 +116,14 @@ class ExternalEditPipeline(
             mediaEngine.requireLosslessConcatCompatibility(signatures)
 
             val inputDescriptors = mutableListOf<ParcelFileDescriptor>()
+            var jacketDescriptor: ParcelFileDescriptor? = null
             var outputDescriptor: ParcelFileDescriptor? = null
             try {
                 inputs.forEach { source -> inputDescriptors += openReadDescriptor(source) }
+                val sourceSignature = signatures.first().signature
+                if (sourceSignature.hasAttachedPicture()) {
+                    jacketDescriptor = openReadDescriptor(inputs.first())
+                }
                 outputDescriptor = openReadWriteDescriptor(destination)
                 val descriptorInputs = inputs.indices.map { index ->
                     NamedMediaDescriptor(
@@ -130,10 +136,13 @@ class ExternalEditPipeline(
                     inputs = descriptorInputs,
                     outputFd = outputDescriptor.fd,
                     outputName = outputName,
+                    sourceSignature = sourceSignature,
+                    jacketFd = jacketDescriptor?.fd,
                     workingDirectory = workDir,
                 )
             } finally {
                 runCatching { outputDescriptor?.close() }
+                runCatching { jacketDescriptor?.close() }
                 inputDescriptors.asReversed().forEach { descriptor ->
                     runCatching { descriptor.close() }
                 }
@@ -352,11 +361,18 @@ class ExternalEditPipeline(
         val destination = Uri.parse(outputUri)
         val remoteDestination = isXFilesRemoteOutput(destination)
         val destinationLabel = if (remoteDestination) "SMB" else "端末"
+        val sourceSignature = openReadDescriptor(source).use { descriptor ->
+            mediaEngine.probeDescriptor(descriptor.fd, source.displayName)
+        }
         var inputDescriptor: ParcelFileDescriptor? = null
+        var jacketDescriptor: ParcelFileDescriptor? = null
         var outputDescriptor: ParcelFileDescriptor? = null
         try {
             onProgress("入力と${destinationLabel}保存先を開いています")
             inputDescriptor = openReadDescriptor(source)
+            if (sourceSignature.hasAttachedPicture()) {
+                jacketDescriptor = openReadDescriptor(source)
+            }
             outputDescriptor = openReadWriteDescriptor(destination)
             onProgress("無劣化でカットしながら${destinationLabel}へ保存中")
             mediaEngine.cutLosslessDescriptors(
@@ -365,9 +381,13 @@ class ExternalEditPipeline(
                 outputName = outputName,
                 startMs = startMs,
                 endMs = endMs,
+                sourceSignature = sourceSignature,
+                jacketFd = jacketDescriptor?.fd,
             )
             runCatching { outputDescriptor.close() }
             outputDescriptor = null
+            runCatching { jacketDescriptor?.close() }
+            jacketDescriptor = null
             runCatching { inputDescriptor.close() }
             inputDescriptor = null
             finishOutput(destination, remoteDestination, onProgress)
@@ -377,6 +397,7 @@ class ExternalEditPipeline(
             throw error
         } finally {
             runCatching { outputDescriptor?.close() }
+            runCatching { jacketDescriptor?.close() }
             runCatching { inputDescriptor?.close() }
         }
     }

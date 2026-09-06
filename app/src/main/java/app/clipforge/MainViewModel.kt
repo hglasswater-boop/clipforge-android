@@ -8,6 +8,8 @@ import androidx.lifecycle.viewModelScope
 import app.clipforge.media.CutMode
 import app.clipforge.media.FfmpegMediaEngine
 import app.clipforge.media.MediaSegment
+import app.clipforge.media.SceneMarker
+import app.clipforge.media.SceneMarkerKind
 import app.clipforge.media.normalizeCutRanges
 import app.clipforge.media.rangeAfterSettingEnd
 import app.clipforge.media.rangeAfterSettingStart
@@ -84,6 +86,9 @@ data class MainUiState(
     val progressPercent: Int? = null,
     val canCancelProcessing: Boolean = false,
     val canUndoEdit: Boolean = false,
+    val sceneSearchBusy: Boolean = false,
+    val sceneMarkers: List<SceneMarker> = emptyList(),
+    val sceneScannedRanges: List<MediaSegment> = emptyList(),
     val selectedVideos: List<PickedVideo> = emptyList(),
     val trimEditor: TrimEditorState? = null,
     val pendingOutput: PendingOutput? = null,
@@ -138,6 +143,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 progressPercent = null,
                                 canCancelProcessing = false,
                                 canUndoEdit = false,
+                                sceneSearchBusy = false,
+                                sceneMarkers = emptyList(),
+                                sceneScannedRanges = emptyList(),
                                 selectedVideos = state.selectedVideos.ifEmpty { listOf(preparedSource) },
                                 trimEditor = TrimEditorState(
                                     sourceUri = processing.sourceUri,
@@ -166,6 +174,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 progressPercent = null,
                                 canCancelProcessing = false,
                                 canUndoEdit = false,
+                                sceneSearchBusy = false,
+                                sceneMarkers = emptyList(),
+                                sceneScannedRanges = emptyList(),
                                 status = processing.message,
                                 error = null,
                             )
@@ -179,6 +190,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 busy = false,
                                 progressPercent = null,
                                 canCancelProcessing = false,
+                                sceneSearchBusy = false,
                                 trimEditor = it.trimEditor ?: editorToRestore,
                                 canUndoEdit = editUndoStack.isNotEmpty(),
                                 status = "失敗",
@@ -194,6 +206,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 busy = false,
                                 progressPercent = null,
                                 canCancelProcessing = false,
+                                sceneSearchBusy = false,
                                 trimEditor = it.trimEditor ?: editorToRestore,
                                 canUndoEdit = editUndoStack.isNotEmpty(),
                                 status = processing.message,
@@ -238,6 +251,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         pendingOutput = null,
                         pendingDestination = null,
                         canUndoEdit = false,
+                        sceneSearchBusy = false,
+                        sceneMarkers = emptyList(),
+                        sceneScannedRanges = emptyList(),
                         status = "${videos.size}本の動画を選択しました",
                         error = if (videos.size != unique.size) "MP4 / MKV 以外のファイルは除外しました" else null,
                     )
@@ -640,6 +656,124 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }.getOrNull()
     }
 
+    suspend fun adjacentSceneMarker(
+        positionMs: Long,
+        forward: Boolean,
+        kind: SceneMarkerKind,
+    ): Long? {
+        val initialState = _uiState.value
+        val editor = initialState.trimEditor ?: return null
+        if (initialState.sceneSearchBusy) return null
+        val pivot = positionMs.coerceIn(0L, editor.durationMs)
+        val tolerance = 250L
+
+        fun nearest(markers: List<SceneMarker>): SceneMarker? = markers
+            .asSequence()
+            .filter { it.kind == kind }
+            .filter { marker ->
+                if (forward) marker.timeMs > pivot + tolerance else marker.timeMs < pivot - tolerance
+            }
+            .let { sequence ->
+                if (forward) sequence.minByOrNull(SceneMarker::timeMs) else sequence.maxByOrNull(SceneMarker::timeMs)
+            }
+
+        val cached = nearest(initialState.sceneMarkers)
+        if (cached != null && intervalCovered(
+                fromMs = minOf(pivot, cached.timeMs),
+                toMs = maxOf(pivot, cached.timeMs),
+                ranges = initialState.sceneScannedRanges,
+            )
+        ) {
+            return cached.timeMs
+        }
+
+        val searchAnchor = if (forward) {
+            (pivot + tolerance).coerceAtMost(editor.durationMs)
+        } else {
+            (pivot - tolerance).coerceAtLeast(0L)
+        }
+        val frontier = if (forward) {
+            coveredForwardEdge(searchAnchor, initialState.sceneScannedRanges)
+        } else {
+            coveredBackwardEdge(searchAnchor, initialState.sceneScannedRanges)
+        }
+        val scanStart = if (forward) {
+            frontier
+        } else {
+            (frontier - SCENE_SEARCH_WINDOW_MS).coerceAtLeast(0L)
+        }
+        val scanEnd = if (forward) {
+            (frontier + SCENE_SEARCH_WINDOW_MS).coerceAtMost(editor.durationMs)
+        } else {
+            frontier
+        }
+        if (scanEnd <= scanStart) {
+            _uiState.update {
+                it.copy(
+                    status = if (forward) "この先に候補はありません" else "この手前に候補はありません",
+                    error = null,
+                )
+            }
+            return null
+        }
+
+        _uiState.update {
+            it.copy(
+                sceneSearchBusy = true,
+                status = if (forward) "次のカット候補を探しています" else "前のカット候補を探しています",
+                error = null,
+            )
+        }
+        return try {
+            val result = navigator.detectSceneWindow(
+                source = sourceFor(editor, initialState),
+                localInputPath = editor.localPath,
+                durationMs = editor.durationMs,
+                startMs = scanStart,
+                endMs = scanEnd,
+            )
+            var mergedMarkers = emptyList<SceneMarker>()
+            _uiState.update { state ->
+                val current = state.trimEditor ?: return@update state
+                if (current.sessionPath != editor.sessionPath) return@update state
+                mergedMarkers = mergeSceneMarkers(state.sceneMarkers + result.markers)
+                state.copy(
+                    sceneMarkers = mergedMarkers,
+                    sceneScannedRanges = mergeScanRanges(
+                        state.sceneScannedRanges + MediaSegment(result.scannedStartMs, result.scannedEndMs),
+                    ),
+                    error = null,
+                )
+            }
+            val target = nearest(mergedMarkers)
+            _uiState.update { state ->
+                val label = when (kind) {
+                    SceneMarkerKind.SCENE_CHANGE -> "シーン切替"
+                    SceneMarkerKind.BLACK -> "黒画面"
+                }
+                state.copy(
+                    status = if (target != null) {
+                        "$label 候補へ移動します"
+                    } else {
+                        "この${SCENE_SEARCH_WINDOW_MS / 1_000}秒には${label}候補なし。もう一度押すと続きから探します"
+                    },
+                    error = null,
+                )
+            }
+            target?.timeMs
+        } catch (error: Throwable) {
+            _uiState.update {
+                it.copy(
+                    status = "カット候補を解析できませんでした",
+                    error = error.message ?: error.javaClass.simpleName,
+                )
+            }
+            null
+        } finally {
+            _uiState.update { it.copy(sceneSearchBusy = false) }
+        }
+    }
+
     fun snapTrimRangeToKeyframes() {
         val editor = _uiState.value.trimEditor ?: return
         if (editor.cutMode != CutMode.LOSSLESS) return
@@ -866,6 +1000,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 progressPercent = null,
                 canCancelProcessing = false,
                 canUndoEdit = false,
+                sceneSearchBusy = false,
+                sceneMarkers = emptyList(),
+                sceneScannedRanges = emptyList(),
                 status = "編集をキャンセルしました",
                 error = null,
             )
@@ -880,6 +1017,53 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun outputHandoffFailed(message: String) {
         _uiState.update { it.copy(pendingOutput = null, status = "出力の受け渡しに失敗しました", error = message) }
+    }
+
+    private fun mergeSceneMarkers(markers: List<SceneMarker>): List<SceneMarker> = markers
+        .sortedWith(compareBy(SceneMarker::timeMs, SceneMarker::kind))
+        .fold(mutableListOf()) { result, marker ->
+            val duplicate = result.lastOrNull { it.kind == marker.kind }
+                ?.let { previous -> kotlin.math.abs(previous.timeMs - marker.timeMs) <= 120L }
+                ?: false
+            if (!duplicate) result += marker
+            result
+        }
+
+    private fun mergeScanRanges(ranges: List<MediaSegment>): List<MediaSegment> {
+        if (ranges.isEmpty()) return emptyList()
+        val sorted = ranges.sortedBy(MediaSegment::startMs)
+        val merged = mutableListOf<MediaSegment>()
+        sorted.forEach { range ->
+            val last = merged.lastOrNull()
+            if (last == null || range.startMs > last.endMs + 1L) {
+                merged += range
+            } else {
+                merged[merged.lastIndex] = MediaSegment(last.startMs, maxOf(last.endMs, range.endMs))
+            }
+        }
+        return merged
+    }
+
+    private fun intervalCovered(fromMs: Long, toMs: Long, ranges: List<MediaSegment>): Boolean {
+        val start = minOf(fromMs, toMs)
+        val end = maxOf(fromMs, toMs)
+        return ranges.any { range -> start >= range.startMs && end <= range.endMs }
+    }
+
+    private fun coveredForwardEdge(positionMs: Long, ranges: List<MediaSegment>): Long {
+        var edge = positionMs
+        ranges.forEach { range ->
+            if (edge in range.startMs..range.endMs) edge = maxOf(edge, range.endMs)
+        }
+        return edge
+    }
+
+    private fun coveredBackwardEdge(positionMs: Long, ranges: List<MediaSegment>): Long {
+        var edge = positionMs
+        ranges.asReversed().forEach { range ->
+            if (edge in range.startMs..range.endMs) edge = minOf(edge, range.startMs)
+        }
+        return edge
     }
 
     private fun recordEditUndo(editor: TrimEditorState) {
@@ -963,5 +1147,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private companion object {
         const val MAX_EDIT_UNDO = 20
+        const val SCENE_SEARCH_WINDOW_MS = 90_000L
     }
 }
