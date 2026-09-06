@@ -13,6 +13,7 @@ import android.os.IBinder
 import android.os.PowerManager
 import app.clipforge.MainActivity
 import app.clipforge.media.AutoTrimAnalyzer
+import app.clipforge.media.AutoTrimPhase
 import app.clipforge.media.AutoTrimStateStore
 import com.arthenica.ffmpegkit.FFmpegKit
 import kotlinx.coroutines.CancellationException
@@ -22,12 +23,14 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import java.util.Locale
 
 class AutoTrimAnalysisService : Service() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var analysisJob: Job? = null
     private var wakeLock: PowerManager.WakeLock? = null
     @Volatile private var cancellationRequested = false
+    private var lastNotificationPercent = -1
 
     override fun onCreate() {
         super.onCreate()
@@ -51,12 +54,14 @@ class AutoTrimAnalysisService : Service() {
         require(durationMs > 0L) { "動画の長さが不正です" }
 
         cancellationRequested = false
+        lastNotificationPercent = -1
         AutoTrimStateStore.begin(sessionPath)
         startAnalysisForeground(
             buildNotification(
                 title = "前後を自動解析中",
-                message = "先頭と末尾の不要動画候補を解析しています",
+                message = "解析を準備しています",
                 ongoing = true,
+                progressPercent = 0,
             ),
         )
         acquireWakeLock()
@@ -67,6 +72,10 @@ class AutoTrimAnalysisService : Service() {
                     sourceUri = sourceUri,
                     localInputPath = localInputPath,
                     durationMs = durationMs,
+                    onProgress = { phase, percent ->
+                        AutoTrimStateStore.progress(sessionPath, phase, percent)
+                        updateProgressNotification(phase, percent)
+                    },
                 )
                 AutoTrimStateStore.ready(sessionPath, analysis)
                 finishNotification("自動解析が完了しました")
@@ -83,6 +92,7 @@ class AutoTrimAnalysisService : Service() {
                 releaseWakeLock()
                 analysisJob = null
                 cancellationRequested = false
+                lastNotificationPercent = -1
                 stopSelf()
             }
         }
@@ -123,6 +133,27 @@ class AutoTrimAnalysisService : Service() {
         }
     }
 
+    private fun updateProgressNotification(phase: AutoTrimPhase, percent: Int) {
+        val safePercent = percent.coerceIn(0, 99)
+        if (safePercent == lastNotificationPercent) return
+        lastNotificationPercent = safePercent
+        val progress = AutoTrimStateStore.state.value.progress
+        val etaText = progress?.estimatedRemainingMs()?.let(::formatShortDuration)
+        val message = buildString {
+            append("$safePercent% ・ ${phase.label}")
+            if (etaText != null) append(" ・ 残り約$etaText")
+        }
+        getSystemService(NotificationManager::class.java).notify(
+            NOTIFICATION_ID,
+            buildNotification(
+                title = "前後を自動解析中",
+                message = message,
+                ongoing = true,
+                progressPercent = safePercent,
+            ),
+        )
+    }
+
     private fun finishNotification(message: String) {
         stopForeground(STOP_FOREGROUND_REMOVE)
         getSystemService(NotificationManager::class.java).notify(
@@ -131,7 +162,12 @@ class AutoTrimAnalysisService : Service() {
         )
     }
 
-    private fun buildNotification(title: String, message: String, ongoing: Boolean): Notification {
+    private fun buildNotification(
+        title: String,
+        message: String,
+        ongoing: Boolean,
+        progressPercent: Int? = null,
+    ): Notification {
         val openIntent = Intent(this, MainActivity::class.java)
             .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
         val pending = PendingIntent.getActivity(
@@ -152,7 +188,12 @@ class AutoTrimAnalysisService : Service() {
             .setAutoCancel(!ongoing)
 
         if (ongoing) {
-            builder.setProgress(0, 0, true)
+            val progress = progressPercent?.coerceIn(0, 99)
+            if (progress == null) {
+                builder.setProgress(0, 0, true)
+            } else {
+                builder.setProgress(100, progress, false)
+            }
             val cancelPending = PendingIntent.getService(
                 this,
                 1,
@@ -194,6 +235,17 @@ class AutoTrimAnalysisService : Service() {
             if (lock.isHeld) runCatching { lock.release() }
         }
         wakeLock = null
+    }
+
+    private fun formatShortDuration(ms: Long): String {
+        val totalSeconds = ((ms.coerceAtLeast(0L) + 999L) / 1_000L).coerceAtLeast(1L)
+        return if (totalSeconds < 60L) {
+            "${totalSeconds}秒"
+        } else {
+            val minutes = totalSeconds / 60L
+            val seconds = totalSeconds % 60L
+            if (seconds == 0L) "${minutes}分" else String.format(Locale.JAPAN, "%d分%02d秒", minutes, seconds)
+        }
     }
 
     companion object {
