@@ -7,7 +7,9 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.net.Uri
+import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import app.clipforge.MainActivity
@@ -31,6 +33,7 @@ class ClipForgeProcessingService : Service() {
     private var processingJob: Job? = null
     private var wakeLock: PowerManager.WakeLock? = null
     @Volatile private var cancellationRequested = false
+    @Volatile private var timeoutFailure: String? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -54,8 +57,9 @@ class ClipForgeProcessingService : Service() {
             return START_NOT_STICKY
         }
 
-        if (processingJob?.isActive == true) return START_NOT_STICKY
+        if (processingJob?.isActive == true) return START_REDELIVER_INTENT
         cancellationRequested = false
+        timeoutFailure = null
 
         val title = when (request.action) {
             ACTION_PREPARE_CUT -> "カット編集を準備中"
@@ -65,8 +69,7 @@ class ClipForgeProcessingService : Service() {
         }
         val initialPercent = if (request.action == ACTION_CUT) 0 else null
         updateProgress(title, "処理を準備しています", initialPercent)
-        startForeground(
-            NOTIFICATION_ID,
+        startProcessingForeground(
             buildNotification(title, "処理を準備しています", true, initialPercent),
         )
         acquireWakeLock()
@@ -90,21 +93,27 @@ class ClipForgeProcessingService : Service() {
                     ACTION_CUT -> cut(request, title, multiCutExporter)
                 }
             } catch (error: Throwable) {
-                if (cancellationRequested || error is CancellationException) {
-                    finishCancelled("処理をキャンセルしました")
-                } else {
-                    val detail = error.message?.takeIf { it.isNotBlank() } ?: error.javaClass.simpleName
-                    finishFailure("処理に失敗しました: $detail")
+                val timeoutMessage = timeoutFailure
+                when {
+                    timeoutMessage != null -> finishFailure(timeoutMessage)
+                    cancellationRequested || error is CancellationException -> {
+                        finishCancelled("処理をキャンセルしました")
+                    }
+                    else -> {
+                        val detail = error.message?.takeIf { it.isNotBlank() } ?: error.javaClass.simpleName
+                        finishFailure("処理に失敗しました: $detail")
+                    }
                 }
             } finally {
                 releaseOutputGrant(request.getStringExtra(EXTRA_OUTPUT_URI))
                 releaseWakeLock()
                 cancellationRequested = false
+                timeoutFailure = null
                 processingJob = null
                 stopSelf(startId)
             }
         }
-        return START_NOT_STICKY
+        return START_REDELIVER_INTENT
     }
 
     private suspend fun prepareCut(
@@ -192,9 +201,19 @@ class ClipForgeProcessingService : Service() {
         )
     }
 
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        val message = "バックグラウンド動画処理の上限時間に達したため停止しました"
+        timeoutFailure = message
+        finishFailure(message)
+        FFmpegKit.cancel()
+        processingJob?.cancel(CancellationException("Foreground media processing timed out"))
+        releaseWakeLock()
+        stopSelf(startId)
+    }
+
     override fun onDestroy() {
         if (processingJob?.isActive == true) {
-            cancellationRequested = true
+            if (timeoutFailure == null) cancellationRequested = true
             FFmpegKit.cancel()
             processingJob?.cancel()
         }
@@ -243,6 +262,19 @@ class ClipForgeProcessingService : Service() {
         stopForeground(STOP_FOREGROUND_REMOVE)
         getSystemService(NotificationManager::class.java)
             .notify(NOTIFICATION_ID, buildNotification("ClipForge", message, false, null))
+    }
+
+    @Suppress("NewApi")
+    private fun startProcessingForeground(notification: Notification) {
+        if (Build.VERSION.SDK_INT >= 35) {
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROCESSING,
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
     }
 
     private fun buildNotification(
