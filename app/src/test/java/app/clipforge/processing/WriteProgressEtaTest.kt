@@ -21,6 +21,18 @@ class WriteProgressEtaTest {
     }
 
     @Test
+    fun estimateCountsDownWhileIntegerProgressIsUnchanged() {
+        var now = 0L
+        val eta = WriteProgressEta { now }
+        eta.decorate("スマートカットを書き出し中 10%")
+        now = 4_000L
+        assertTrue(eta.decorate("スマートカットを書き出し中 20%").contains("残り 約32秒"))
+
+        now = 9_000L
+        assertTrue(eta.decorate("スマートカットを書き出し中 20%").contains("残り 約27秒"))
+    }
+
+    @Test
     fun nonWritePhaseResetsEstimate() {
         var now = 0L
         val eta = WriteProgressEta { now }
@@ -46,9 +58,11 @@ class WriteProgressEtaTest {
     }
 
     @Test
-    fun remainingTimeFormattingIsCompact() {
+    fun remainingTimeFormattingKeepsSecondsMoving() {
         assertEquals("約45秒", formatRemainingTime(45_000L))
         assertEquals("約2分40秒", formatRemainingTime(160_000L))
+        assertEquals("約2分9秒", formatRemainingTime(129_000L))
+        assertEquals("約2分", formatRemainingTime(120_000L))
         assertEquals("約1時間12分", formatRemainingTime(72L * 60L * 1_000L))
     }
 }
