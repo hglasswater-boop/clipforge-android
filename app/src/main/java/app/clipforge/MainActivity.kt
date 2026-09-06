@@ -22,13 +22,18 @@ import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import app.clipforge.media.AutoTrimStateStore
+import app.clipforge.processing.ActiveCutSessionPhase
+import app.clipforge.processing.ActiveCutSessionStore
 import app.clipforge.processing.AutoTrimAnalysisService
+import app.clipforge.processing.ProcessingState
+import app.clipforge.processing.ProcessingStateStore
 import app.clipforge.ui.AutoTrimEntryButton
 import app.clipforge.ui.AutoTrimHost
 import app.clipforge.ui.ClipForgeApp
 import app.clipforge.ui.ClipForgeDirectOutputHost
 import app.clipforge.update.ClipForgeUpdateHost
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
@@ -40,6 +45,31 @@ class MainActivity : ComponentActivity() {
             val mainViewModel: MainViewModel = viewModel()
             val mainState by mainViewModel.uiState.collectAsStateWithLifecycle()
             val dark = isSystemInDarkTheme()
+
+            LaunchedEffect(Unit) {
+                withContext(Dispatchers.IO) {
+                    ActiveCutSessionStore.restore(applicationContext.cacheDir)
+                }
+            }
+
+            LaunchedEffect(Unit) {
+                ActiveCutSessionStore.state.collectLatest { active ->
+                    active ?: return@collectLatest
+                    if (active.phase != ActiveCutSessionPhase.EDITING) return@collectLatest
+                    if (mainViewModel.uiState.value.trimEditor != null) return@collectLatest
+                    if (ProcessingStateStore.state.value is ProcessingState.Running) return@collectLatest
+
+                    ProcessingStateStore.cutPrepared(
+                        sourceUri = active.sourceUri,
+                        sourceName = active.sourceName,
+                        sessionPath = active.sessionPath,
+                        localPath = active.localPath,
+                        durationMs = active.durationMs,
+                        thumbnailPaths = active.thumbnailPaths,
+                        persistActiveSession = false,
+                    )
+                }
+            }
 
             LaunchedEffect(mainState.trimEditor?.sessionPath) {
                 val editor = mainState.trimEditor ?: return@LaunchedEffect
