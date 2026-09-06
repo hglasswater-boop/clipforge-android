@@ -22,6 +22,12 @@ data class SceneDetectionResult(
     val scannedEndMs: Long,
 )
 
+enum class SceneScanMode {
+    AUTO,
+    COARSE,
+    PRECISE,
+}
+
 private val showInfoPtsRegex = Regex("""pts_time:([0-9]+(?:\.[0-9]+)?)""")
 private val blackStartRegex = Regex("""black_start:([0-9]+(?:\.[0-9]+)?)""")
 
@@ -55,19 +61,50 @@ internal fun parseSceneDetectionLog(log: String, offsetMs: Long): List<SceneMark
         result
     }
 
+internal fun resolvedSceneScanMode(
+    requested: SceneScanMode,
+    scanDurationMs: Long,
+): SceneScanMode = when (requested) {
+    SceneScanMode.AUTO -> if (scanDurationMs >= COARSE_SCAN_THRESHOLD_MS) {
+        SceneScanMode.COARSE
+    } else {
+        SceneScanMode.PRECISE
+    }
+    else -> requested
+}
+
+internal fun sceneVideoFilter(mode: SceneScanMode): String = when (mode) {
+    SceneScanMode.COARSE ->
+        "scale=240:-2:flags=fast_bilinear,setpts=PTS-STARTPTS," +
+            "blackdetect=d=0.40:pic_th=0.98:pix_th=0.10," +
+            "select=gt(scene\\,0.40),showinfo"
+    SceneScanMode.PRECISE, SceneScanMode.AUTO ->
+        "scale=320:-2:flags=fast_bilinear,setpts=PTS-STARTPTS," +
+            "blackdetect=d=0.08:pic_th=0.98:pix_th=0.10," +
+            "select=gt(scene\\,0.35),showinfo"
+}
+
 class SceneChangeDetector {
     suspend fun detectPath(
         path: String,
         durationMs: Long,
         startMs: Long,
         endMs: Long,
+        mode: SceneScanMode = SceneScanMode.AUTO,
         onProgress: (Double) -> Unit = {},
     ): SceneDetectionResult = withContext(Dispatchers.IO) {
+        val actualMode = resolvedSceneScanMode(mode, endMs - startMs)
+        val inputArguments = mutableListOf("-ss", seconds(startMs))
+        if (actualMode == SceneScanMode.COARSE) {
+            inputArguments += listOf("-skip_frame", "nokey")
+        }
+        inputArguments += listOf("-i", path)
         detect(
-            inputArguments = listOf("-ss", seconds(startMs), "-i", path),
+            inputArguments = inputArguments,
             durationMs = durationMs,
             startMs = startMs,
             endMs = endMs,
+            mode = actualMode,
             onProgress = onProgress,
         )
     }
@@ -77,13 +114,21 @@ class SceneChangeDetector {
         durationMs: Long,
         startMs: Long,
         endMs: Long,
+        mode: SceneScanMode = SceneScanMode.AUTO,
         onProgress: (Double) -> Unit = {},
     ): SceneDetectionResult = withContext(Dispatchers.IO) {
+        val actualMode = resolvedSceneScanMode(mode, endMs - startMs)
+        val inputArguments = mutableListOf("-ss", seconds(startMs))
+        if (actualMode == SceneScanMode.COARSE) {
+            inputArguments += listOf("-skip_frame", "nokey")
+        }
+        inputArguments += listOf("-fd", fd.toString(), "-i", "fd:")
         detect(
-            inputArguments = listOf("-ss", seconds(startMs), "-fd", fd.toString(), "-i", "fd:"),
+            inputArguments = inputArguments,
             durationMs = durationMs,
             startMs = startMs,
             endMs = endMs,
+            mode = actualMode,
             onProgress = onProgress,
         )
     }
@@ -93,6 +138,7 @@ class SceneChangeDetector {
         durationMs: Long,
         startMs: Long,
         endMs: Long,
+        mode: SceneScanMode,
         onProgress: (Double) -> Unit,
     ): SceneDetectionResult {
         val safeDuration = durationMs.coerceAtLeast(1L)
@@ -112,10 +158,7 @@ class SceneChangeDetector {
             "-t", seconds(safeEnd - safeStart),
             "-map", "0:V:0",
             "-an", "-sn", "-dn",
-            "-vf",
-            "scale=320:-2:flags=fast_bilinear,setpts=PTS-STARTPTS," +
-                "blackdetect=d=0.08:pic_th=0.98:pix_th=0.10," +
-                "select=gt(scene\\,0.35),showinfo",
+            "-vf", sceneVideoFilter(mode),
             "-f", "null",
             "-",
         )
@@ -140,3 +183,5 @@ class SceneChangeDetector {
     private fun seconds(ms: Long): String =
         "%.3f".format(Locale.US, ms.coerceAtLeast(0L) / 1000.0)
 }
+
+private const val COARSE_SCAN_THRESHOLD_MS = 90_000L

@@ -1,6 +1,7 @@
 package app.clipforge.media
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class SceneChangeDetectorTest {
@@ -35,5 +36,28 @@ class SceneChangeDetectorTest {
             ),
             parseSceneDetectionLog(log, 0L),
         )
+    }
+
+    @Test
+    fun longAutoScansUseCoarseKeyframeMode() {
+        assertEquals(
+            SceneScanMode.COARSE,
+            resolvedSceneScanMode(SceneScanMode.AUTO, 10 * 60_000L),
+        )
+    }
+
+    @Test
+    fun shortAutoScansKeepPreciseMode() {
+        assertEquals(
+            SceneScanMode.PRECISE,
+            resolvedSceneScanMode(SceneScanMode.AUTO, 30_000L),
+        )
+    }
+
+    @Test
+    fun coarseFilterUsesLowerResolutionAndStricterSceneThreshold() {
+        val filter = sceneVideoFilter(SceneScanMode.COARSE)
+        assertTrue(filter.contains("scale=240"))
+        assertTrue(filter.contains("gt(scene\\,0.40)"))
     }
 }
