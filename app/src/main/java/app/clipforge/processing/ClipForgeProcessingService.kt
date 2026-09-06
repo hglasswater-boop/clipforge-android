@@ -91,7 +91,12 @@ class ClipForgeProcessingService : Service() {
                 context = applicationContext,
                 mediaEngine = mediaEngine,
             )
+            var providerLeases: ContentProviderLeaseSet? = null
             try {
+                providerLeases = ContentProviderLeaseSet.acquire(
+                    contentResolver = contentResolver,
+                    uriStrings = providerUrisFor(request),
+                )
                 if (redelivered) resetOutputForRedelivery(request, title)
                 when (request.action) {
                     ACTION_PREPARE_CUT -> prepareCut(request, title, pipeline)
@@ -111,6 +116,7 @@ class ClipForgeProcessingService : Service() {
                     }
                 }
             } finally {
+                providerLeases?.close()
                 releaseOutputGrant(request.getStringExtra(EXTRA_OUTPUT_URI))
                 releaseWakeLock()
                 cancellationRequested = false
@@ -205,6 +211,24 @@ class ClipForgeProcessingService : Service() {
             displayName = sourceName,
             sizeBytes = sourceSize,
         )
+    }
+
+    private fun providerUrisFor(request: Intent): List<String> = when (request.action) {
+        ACTION_PREPARE_CUT -> listOfNotNull(request.getStringExtra(EXTRA_INPUT_URI))
+
+        ACTION_CONCAT -> buildList {
+            addAll(request.getStringArrayListExtra(EXTRA_INPUT_URIS).orEmpty())
+            request.getStringExtra(EXTRA_OUTPUT_URI)?.let(::add)
+        }
+
+        ACTION_CUT -> buildList {
+            if (request.getStringExtra(EXTRA_LOCAL_INPUT) == null) {
+                request.getStringExtra(EXTRA_INPUT_URI)?.let(::add)
+            }
+            request.getStringExtra(EXTRA_OUTPUT_URI)?.let(::add)
+        }
+
+        else -> emptyList()
     }
 
     private fun resetOutputForRedelivery(request: Intent, title: String) {
