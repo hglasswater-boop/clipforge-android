@@ -66,6 +66,11 @@ data class KnownClipMatch(
     val similarity: Double,
 )
 
+private data class RankedCandidate(
+    val candidate: AutoTrimCandidate,
+    val directionalTransitionStrength: Double,
+)
+
 internal fun rankAutoTrimCandidates(
     side: AutoTrimSide,
     durationMs: Long,
@@ -77,15 +82,18 @@ internal fun rankAutoTrimCandidates(
 ): List<AutoTrimCandidate> {
     if (durationMs <= 1L || windowEndMs <= windowStartMs) return emptyList()
 
-    val candidates = mutableListOf<AutoTrimCandidate>()
+    val ranked = mutableListOf<RankedCandidate>()
     knownClipMatch?.let { match ->
         val safeBoundary = match.boundaryMs.coerceIn(1L, durationMs - 1L)
-        candidates += AutoTrimCandidate(
-            side = side,
-            boundaryMs = safeBoundary,
-            confidence = (0.78 + match.similarity.coerceIn(0.0, 1.0) * 0.20).coerceAtMost(0.98),
-            evidence = setOf(AutoTrimEvidence.KNOWN_CLIP),
-            knownClipSimilarity = match.similarity,
+        ranked += RankedCandidate(
+            candidate = AutoTrimCandidate(
+                side = side,
+                boundaryMs = safeBoundary,
+                confidence = (0.78 + match.similarity.coerceIn(0.0, 1.0) * 0.20).coerceAtMost(0.98),
+                evidence = setOf(AutoTrimEvidence.KNOWN_CLIP),
+                knownClipSimilarity = match.similarity,
+            ),
+            directionalTransitionStrength = 1.0,
         )
     }
 
@@ -129,32 +137,47 @@ internal fun rankAutoTrimCandidates(
         }
         if ((hasScene || hasBlack) && (hasAudioJump || hasSilence)) score += 0.10
 
-        val beforeDensity = sceneDensity(sceneMarkers, boundary - DENSITY_WINDOW_MS, boundary)
-        val afterDensity = sceneDensity(sceneMarkers, boundary, boundary + DENSITY_WINDOW_MS)
-        val densityAdvantage = when (side) {
-            AutoTrimSide.START -> beforeDensity - afterDensity
-            AutoTrimSide.END -> afterDensity - beforeDensity
-        }
-        if (densityAdvantage >= 2) {
-            score += (densityAdvantage.coerceAtMost(6) / 6.0) * 0.16
+        val transitionStrength = directionalTransitionStrength(
+            side = side,
+            boundaryMs = boundary,
+            windowStartMs = windowStartMs,
+            windowEndMs = windowEndMs,
+            sceneMarkers = sceneMarkers,
+            audioSignals = audioSignals,
+        )
+        if (transitionStrength >= MIN_DIRECTIONAL_TRANSITION_STRENGTH) {
+            score += (0.10 + transitionStrength * 0.14).coerceAtMost(MAX_DIRECTIONAL_BONUS)
             evidence += AutoTrimEvidence.SCENE_DENSITY
+        } else if (transitionStrength <= -MIN_OPPOSITE_TRANSITION_STRENGTH) {
+            score -= ((-transitionStrength - MIN_OPPOSITE_TRANSITION_STRENGTH) * 0.18)
+                .coerceAtMost(MAX_OPPOSITE_TRANSITION_PENALTY)
         }
 
         if (evidence.isEmpty()) return@forEach
-        candidates += AutoTrimCandidate(
-            side = side,
-            boundaryMs = boundary,
-            confidence = score.coerceIn(0.35, 0.91),
-            evidence = evidence,
+        ranked += RankedCandidate(
+            candidate = AutoTrimCandidate(
+                side = side,
+                boundaryMs = boundary,
+                confidence = score.coerceIn(0.35, 0.91),
+                evidence = evidence,
+            ),
+            directionalTransitionStrength = transitionStrength.coerceAtLeast(0.0),
         )
     }
 
-    val ordered = candidates.sortedWith(
-        compareByDescending<AutoTrimCandidate> { AutoTrimEvidence.KNOWN_CLIP in it.evidence }
-            .thenByDescending(AutoTrimCandidate::confidence),
+    val ordered = ranked.sortedWith(
+        compareByDescending<RankedCandidate> {
+            AutoTrimEvidence.KNOWN_CLIP in it.candidate.evidence
+        }
+            .thenByDescending {
+                it.directionalTransitionStrength >= MIN_DIRECTIONAL_TRANSITION_STRENGTH
+            }
+            .thenByDescending(RankedCandidate::directionalTransitionStrength)
+            .thenByDescending { it.candidate.confidence },
     )
     val separated = mutableListOf<AutoTrimCandidate>()
-    ordered.forEach { candidate ->
+    ordered.forEach { rankedCandidate ->
+        val candidate = rankedCandidate.candidate
         if (separated.none { abs(it.boundaryMs - candidate.boundaryMs) < MIN_CANDIDATE_SEPARATION_MS }) {
             separated += candidate
         }
@@ -211,15 +234,80 @@ private fun clusterTimes(times: List<Long>, toleranceMs: Long): List<Long> {
     return clusters.map { cluster -> cluster[cluster.size / 2] }
 }
 
-private fun sceneDensity(markers: List<SceneMarker>, startMs: Long, endMs: Long): Int {
-    val safeStart = max(0L, startMs)
-    return markers.count {
-        it.kind == SceneMarkerKind.SCENE_CHANGE && it.timeMs in safeStart until endMs
+/**
+ * Estimates whether a candidate looks like an edge-clip entry/exit rather than an internal cut.
+ *
+ * START wants activity to fall after the boundary: noisy intro -> main feature.
+ * END wants activity to rise after the boundary: main feature -> appended trailer/outro.
+ *
+ * Audio is scanned across the entire edge window, so it is the primary density signal. Precise
+ * scene markers are deliberately down-weighted because sparse refinement only decodes selected
+ * short windows and therefore cannot represent whole-window density by itself.
+ */
+private fun directionalTransitionStrength(
+    side: AutoTrimSide,
+    boundaryMs: Long,
+    windowStartMs: Long,
+    windowEndMs: Long,
+    sceneMarkers: List<SceneMarker>,
+    audioSignals: List<AutoTrimAudioSignal>,
+): Double {
+    val beforeStart = max(windowStartMs, boundaryMs - TRANSITION_ACTIVITY_WINDOW_MS)
+    val beforeEnd = (boundaryMs - TRANSITION_GUARD_MS).coerceAtLeast(beforeStart)
+    val afterStart = (boundaryMs + TRANSITION_GUARD_MS).coerceAtMost(windowEndMs)
+    val afterEnd = minOf(windowEndMs, boundaryMs + TRANSITION_ACTIVITY_WINDOW_MS)
+
+    val before = activityDensity(beforeStart, beforeEnd, sceneMarkers, audioSignals)
+    val after = activityDensity(afterStart, afterEnd, sceneMarkers, audioSignals)
+    val total = before + after
+    if (total < MIN_TOTAL_ACTIVITY_DENSITY) return 0.0
+
+    val desiredDelta = when (side) {
+        AutoTrimSide.START -> before - after
+        AutoTrimSide.END -> after - before
     }
+    return (desiredDelta / total).coerceIn(-1.0, 1.0)
+}
+
+private fun activityDensity(
+    startMs: Long,
+    endMs: Long,
+    sceneMarkers: List<SceneMarker>,
+    audioSignals: List<AutoTrimAudioSignal>,
+): Double {
+    if (endMs <= startMs) return 0.0
+
+    val audioWeight = audioSignals.asSequence()
+        .filter { it.timeMs in startMs until endMs }
+        .sumOf { signal ->
+            when (signal.kind) {
+                AutoTrimAudioSignalKind.LEVEL_JUMP -> 1.0
+                AutoTrimAudioSignalKind.SILENCE_START,
+                AutoTrimAudioSignalKind.SILENCE_END -> 1.15
+            }
+        }
+    val sceneWeight = sceneMarkers.asSequence()
+        .filter { it.timeMs in startMs until endMs }
+        .sumOf { marker ->
+            when (marker.kind) {
+                SceneMarkerKind.SCENE_CHANGE -> 0.30
+                SceneMarkerKind.BLACK -> 0.55
+            }
+        }
+
+    val minutes = ((endMs - startMs).toDouble() / 60_000.0).coerceAtLeast(MIN_DENSITY_WINDOW_MINUTES)
+    return (audioWeight + sceneWeight) / minutes
 }
 
 private const val EVENT_CLUSTER_MS = 1_500L
-private const val DENSITY_WINDOW_MS = 60_000L
+private const val TRANSITION_ACTIVITY_WINDOW_MS = 45_000L
+private const val TRANSITION_GUARD_MS = 2_000L
+private const val MIN_DENSITY_WINDOW_MINUTES = 0.20
+private const val MIN_TOTAL_ACTIVITY_DENSITY = 0.50
+private const val MIN_DIRECTIONAL_TRANSITION_STRENGTH = 0.22
+private const val MIN_OPPOSITE_TRANSITION_STRENGTH = 0.35
+private const val MAX_DIRECTIONAL_BONUS = 0.24
+private const val MAX_OPPOSITE_TRANSITION_PENALTY = 0.10
 private const val MIN_CANDIDATE_SEPARATION_MS = 5_000L
 private const val MAX_CANDIDATES_PER_SIDE = 3
 private const val VISUAL_PAIR_TOLERANCE_MS = 4_000L
