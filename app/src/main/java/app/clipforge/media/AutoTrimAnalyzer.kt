@@ -51,22 +51,55 @@ class AutoTrimAnalyzer(context: Context) {
         sourceUri: String,
         localInputPath: String?,
         durationMs: Long,
+        onProgress: (AutoTrimProgress) -> Unit = {},
     ): AutoTrimAnalysis = withContext(Dispatchers.IO) {
         require(durationMs > 1L) { "動画の長さを取得できません" }
+        val tracker = AutoTrimProgressTracker()
+        fun emit(phase: AutoTrimPhase, fraction: Double) {
+            onProgress(tracker.update(phase, fraction))
+        }
+
+        emit(AutoTrimPhase.PREPARING, 0.0)
         val edgeWindowMs = edgeWindowFor(durationMs)
         val startRange = MediaSegment(0L, edgeWindowMs)
         val endRange = MediaSegment((durationMs - edgeWindowMs).coerceAtLeast(0L), durationMs)
+        emit(AutoTrimPhase.PREPARING, 1.0)
 
-        val startScenes = detectScenes(sourceUri, localInputPath, durationMs, startRange)
-        val endScenes = detectScenes(sourceUri, localInputPath, durationMs, endRange)
-        val startAudio = detectAudio(sourceUri, localInputPath, durationMs, startRange)
-        val endAudio = detectAudio(sourceUri, localInputPath, durationMs, endRange)
+        val startScenes = detectScenes(
+            sourceUri = sourceUri,
+            localInputPath = localInputPath,
+            durationMs = durationMs,
+            range = startRange,
+            onProgress = { emit(AutoTrimPhase.START_SCENE, it) },
+        )
+        val endScenes = detectScenes(
+            sourceUri = sourceUri,
+            localInputPath = localInputPath,
+            durationMs = durationMs,
+            range = endRange,
+            onProgress = { emit(AutoTrimPhase.END_SCENE, it) },
+        )
+        val startAudio = detectAudio(
+            sourceUri = sourceUri,
+            localInputPath = localInputPath,
+            durationMs = durationMs,
+            range = startRange,
+            onProgress = { emit(AutoTrimPhase.START_AUDIO, it) },
+        )
+        val endAudio = detectAudio(
+            sourceUri = sourceUri,
+            localInputPath = localInputPath,
+            durationMs = durationMs,
+            range = endRange,
+            onProgress = { emit(AutoTrimPhase.END_AUDIO, it) },
+        )
 
         val visual = sampleVisualFingerprints(
             sourceUri = sourceUri,
             localInputPath = localInputPath,
             durationMs = durationMs,
             edgeWindowMs = edgeWindowMs,
+            onProgress = { emit(AutoTrimPhase.VISUAL_FINGERPRINT, it) },
         )
         val startFingerprint = EdgeFingerprintSnapshot(
             side = AutoTrimSide.START,
@@ -91,34 +124,46 @@ class AutoTrimAnalyzer(context: Context) {
             }.sortedBy(AudioFingerprintPoint::offsetFromEdgeMs),
         )
 
+        emit(AutoTrimPhase.KNOWN_CLIP_MATCH, 0.0)
         val known = knownStore.load()
+        emit(AutoTrimPhase.KNOWN_CLIP_MATCH, 0.25)
         val startKnown = bestKnownMatch(startFingerprint, known, durationMs)
+        emit(AutoTrimPhase.KNOWN_CLIP_MATCH, 0.65)
         val endKnown = bestKnownMatch(endFingerprint, known, durationMs)
+        emit(AutoTrimPhase.KNOWN_CLIP_MATCH, 1.0)
 
-        AutoTrimAnalysis(
-            startCandidates = rankAutoTrimCandidates(
-                side = AutoTrimSide.START,
-                durationMs = durationMs,
-                windowStartMs = startRange.startMs,
-                windowEndMs = startRange.endMs,
-                sceneMarkers = startScenes.markers,
-                audioSignals = startAudio.signals,
-                knownClipMatch = startKnown,
-            ),
-            endCandidates = rankAutoTrimCandidates(
-                side = AutoTrimSide.END,
-                durationMs = durationMs,
-                windowStartMs = endRange.startMs,
-                windowEndMs = endRange.endMs,
-                sceneMarkers = endScenes.markers,
-                audioSignals = endAudio.signals,
-                knownClipMatch = endKnown,
-            ),
+        emit(AutoTrimPhase.RANKING, 0.0)
+        val startCandidates = rankAutoTrimCandidates(
+            side = AutoTrimSide.START,
+            durationMs = durationMs,
+            windowStartMs = startRange.startMs,
+            windowEndMs = startRange.endMs,
+            sceneMarkers = startScenes.markers,
+            audioSignals = startAudio.signals,
+            knownClipMatch = startKnown,
+        )
+        emit(AutoTrimPhase.RANKING, 0.5)
+        val endCandidates = rankAutoTrimCandidates(
+            side = AutoTrimSide.END,
+            durationMs = durationMs,
+            windowStartMs = endRange.startMs,
+            windowEndMs = endRange.endMs,
+            sceneMarkers = endScenes.markers,
+            audioSignals = endAudio.signals,
+            knownClipMatch = endKnown,
+        )
+        emit(AutoTrimPhase.RANKING, 1.0)
+
+        val result = AutoTrimAnalysis(
+            startCandidates = startCandidates,
+            endCandidates = endCandidates,
             startFingerprint = startFingerprint,
             endFingerprint = endFingerprint,
             scannedStart = startRange,
             scannedEnd = endRange,
         )
+        emit(AutoTrimPhase.COMPLETE, 1.0)
+        result
     }
 
     suspend fun rememberConfirmed(
@@ -175,6 +220,7 @@ class AutoTrimAnalyzer(context: Context) {
         localInputPath: String?,
         durationMs: Long,
         range: MediaSegment,
+        onProgress: (Double) -> Unit,
     ): SceneDetectionResult = runCatching {
         if (localInputPath != null) {
             sceneDetector.detectPath(
@@ -182,6 +228,7 @@ class AutoTrimAnalyzer(context: Context) {
                 durationMs = durationMs,
                 startMs = range.startMs,
                 endMs = range.endMs,
+                onProgress = onProgress,
             )
         } else {
             openSeekable(sourceUri).use { descriptor ->
@@ -190,11 +237,13 @@ class AutoTrimAnalyzer(context: Context) {
                     durationMs = durationMs,
                     startMs = range.startMs,
                     endMs = range.endMs,
+                    onProgress = onProgress,
                 )
             }
         }
     }.getOrElse { error ->
         if (error is CancellationException) throw error
+        onProgress(1.0)
         SceneDetectionResult(emptyList(), range.startMs, range.endMs)
     }
 
@@ -203,6 +252,7 @@ class AutoTrimAnalyzer(context: Context) {
         localInputPath: String?,
         durationMs: Long,
         range: MediaSegment,
+        onProgress: (Double) -> Unit,
     ): AudioFeatureResult = runCatching {
         if (localInputPath != null) {
             audioDetector.detectPath(
@@ -210,6 +260,7 @@ class AutoTrimAnalyzer(context: Context) {
                 durationMs = durationMs,
                 startMs = range.startMs,
                 endMs = range.endMs,
+                onProgress = onProgress,
             )
         } else {
             openSeekable(sourceUri).use { descriptor ->
@@ -218,11 +269,13 @@ class AutoTrimAnalyzer(context: Context) {
                     durationMs = durationMs,
                     startMs = range.startMs,
                     endMs = range.endMs,
+                    onProgress = onProgress,
                 )
             }
         }
     }.getOrElse { error ->
         if (error is CancellationException) throw error
+        onProgress(1.0)
         AudioFeatureResult(emptyList(), emptyList())
     }
 
@@ -231,6 +284,7 @@ class AutoTrimAnalyzer(context: Context) {
         localInputPath: String?,
         durationMs: Long,
         edgeWindowMs: Long,
+        onProgress: (Double) -> Unit,
     ): Pair<List<VisualFingerprintPoint>, List<VisualFingerprintPoint>> {
         val retriever = MediaMetadataRetriever()
         return try {
@@ -240,26 +294,40 @@ class AutoTrimAnalyzer(context: Context) {
                 retriever.setDataSource(appContext, Uri.parse(sourceUri))
             }
             val intervalMs = max(MIN_VISUAL_SAMPLE_INTERVAL_MS, edgeWindowMs / MAX_VISUAL_SAMPLES_PER_EDGE)
+            val offsets = buildList {
+                var offset = 0L
+                while (offset <= edgeWindowMs) {
+                    add(offset)
+                    if (edgeWindowMs - offset < intervalMs) break
+                    offset += intervalMs
+                }
+            }
+            val totalFrames = (offsets.size * 2).coerceAtLeast(1)
+            var completedFrames = 0
             val start = mutableListOf<VisualFingerprintPoint>()
             val end = mutableListOf<VisualFingerprintPoint>()
-            var offset = 0L
-            while (offset <= edgeWindowMs) {
+            onProgress(0.0)
+            offsets.forEach { offset ->
                 coroutineContext.ensureActive()
                 frameHash(retriever, offset)?.let { hash ->
                     start += VisualFingerprintPoint(offsetFromEdgeMs = offset, hash = hash)
                 }
+                completedFrames += 1
+                onProgress(completedFrames.toDouble() / totalFrames.toDouble())
+
                 coroutineContext.ensureActive()
                 val endTime = (durationMs - offset).coerceAtLeast(0L)
                 frameHash(retriever, endTime)?.let { hash ->
                     end += VisualFingerprintPoint(offsetFromEdgeMs = offset, hash = hash)
                 }
-                if (edgeWindowMs - offset < intervalMs) break
-                offset += intervalMs
+                completedFrames += 1
+                onProgress(completedFrames.toDouble() / totalFrames.toDouble())
             }
             start to end
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Throwable) {
+            onProgress(1.0)
             emptyList<VisualFingerprintPoint>() to emptyList()
         } finally {
             runCatching { retriever.release() }
@@ -336,12 +404,14 @@ private class AudioFeatureDetector {
         durationMs: Long,
         startMs: Long,
         endMs: Long,
+        onProgress: (Double) -> Unit = {},
     ): AudioFeatureResult = withContext(Dispatchers.IO) {
         detect(
             inputArguments = listOf("-ss", seconds(startMs), "-i", path),
             durationMs = durationMs,
             startMs = startMs,
             endMs = endMs,
+            onProgress = onProgress,
         )
     }
 
@@ -350,12 +420,14 @@ private class AudioFeatureDetector {
         durationMs: Long,
         startMs: Long,
         endMs: Long,
+        onProgress: (Double) -> Unit = {},
     ): AudioFeatureResult = withContext(Dispatchers.IO) {
         detect(
             inputArguments = listOf("-ss", seconds(startMs), "-fd", fd.toString(), "-i", "fd:"),
             durationMs = durationMs,
             startMs = startMs,
             endMs = endMs,
+            onProgress = onProgress,
         )
     }
 
@@ -364,11 +436,15 @@ private class AudioFeatureDetector {
         durationMs: Long,
         startMs: Long,
         endMs: Long,
+        onProgress: (Double) -> Unit,
     ): AudioFeatureResult {
         val safeDuration = durationMs.coerceAtLeast(1L)
         val safeStart = startMs.coerceIn(0L, safeDuration)
         val safeEnd = endMs.coerceIn(safeStart, safeDuration)
-        if (safeEnd <= safeStart) return AudioFeatureResult(emptyList(), emptyList())
+        if (safeEnd <= safeStart) {
+            onProgress(1.0)
+            return AudioFeatureResult(emptyList(), emptyList())
+        }
 
         val arguments = mutableListOf("-hide_banner", "-nostats")
         arguments += inputArguments
@@ -383,7 +459,11 @@ private class AudioFeatureDetector {
                 "silencedetect=n=-45dB:d=0.35",
             "-f", "null", "-",
         )
-        val session = executeCancellableFfmpeg(arguments)
+        val session = executeCancellableFfmpeg(
+            arguments = arguments,
+            expectedDurationMs = safeEnd - safeStart,
+            onProgress = onProgress,
+        )
         if (!ReturnCode.isSuccess(session.returnCode)) {
             return AudioFeatureResult(emptyList(), emptyList())
         }
