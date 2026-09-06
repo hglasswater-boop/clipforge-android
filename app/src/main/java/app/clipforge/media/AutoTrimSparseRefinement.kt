@@ -73,9 +73,7 @@ internal fun buildSceneRefinementWindows(
     audioSignals: List<AutoTrimAudioSignal>,
     knownMatch: KnownClipMatch?,
 ): List<MediaSegment> {
-    if (knownMatch?.similarity != null && knownMatch.similarity >= KNOWN_FAST_PATH_SIMILARITY) {
-        return emptyList()
-    }
+    if (shouldSkipSceneRefinement(knownMatch)) return emptyList()
 
     val audioHints = audioRefinementHints(audioSignals)
     val candidates = mutableListOf<SceneRefinementHint>()
@@ -132,7 +130,7 @@ internal fun buildSceneRefinementWindows(
 }
 
 internal fun shouldSkipSceneRefinement(match: KnownClipMatch?): Boolean =
-    match != null && match.similarity >= KNOWN_FAST_PATH_SIMILARITY
+    (match?.similarity ?: 0.0) >= KNOWN_FAST_PATH_SIMILARITY
 
 private fun audioRefinementHints(signals: List<AutoTrimAudioSignal>): List<SceneRefinementHint> {
     if (signals.isEmpty()) return emptyList()
