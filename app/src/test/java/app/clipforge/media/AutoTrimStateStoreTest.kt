@@ -27,6 +27,8 @@ class AutoTrimStateStoreTest {
         assertTrue(state.visible)
         assertTrue(state.running)
         assertEquals(session, state.sessionPath)
+        assertEquals(0, state.progress?.overallPercent)
+        assertEquals(AutoTrimPhase.PREPARING, state.progress?.phase)
     }
 
     @Test
@@ -51,6 +53,57 @@ class AutoTrimStateStoreTest {
     }
 
     @Test
+    fun progressNeverMovesBackwards() {
+        val session = session("progress")
+        AutoTrimStateStore.begin(session)
+        AutoTrimStateStore.updateProgress(
+            session,
+            AutoTrimProgress(
+                phase = AutoTrimPhase.START_AUDIO,
+                overallPercent = 47,
+                phasePercent = 80,
+                elapsedMs = 8_000L,
+                remainingMs = 9_000L,
+            ),
+        )
+        AutoTrimStateStore.updateProgress(
+            session,
+            AutoTrimProgress(
+                phase = AutoTrimPhase.END_SCENE,
+                overallPercent = 32,
+                phasePercent = 100,
+                elapsedMs = 9_000L,
+                remainingMs = 10_000L,
+            ),
+        )
+
+        val progress = AutoTrimStateStore.state.value.progress
+        assertEquals(47, progress?.overallPercent)
+        assertEquals(AutoTrimPhase.START_AUDIO, progress?.phase)
+    }
+
+    @Test
+    fun runningProgressSurvivesInMemoryStoreReset() {
+        val session = session("progress-restore")
+        AutoTrimStateStore.begin(session)
+        val expected = AutoTrimProgress(
+            phase = AutoTrimPhase.END_AUDIO,
+            overallPercent = 61,
+            phasePercent = 80,
+            elapsedMs = 12_500L,
+            remainingMs = 8_200L,
+        )
+        AutoTrimStateStore.updateProgress(session, expected)
+
+        AutoTrimStateStore.resetForTest()
+        assertTrue(AutoTrimStateStore.restore(session))
+
+        val restored = AutoTrimStateStore.state.value
+        assertTrue(restored.running)
+        assertEquals(expected, restored.progress)
+    }
+
+    @Test
     fun completedAnalysisSurvivesInMemoryStoreReset() {
         val session = session("restore")
         val expected = sampleAnalysis()
@@ -65,6 +118,8 @@ class AutoTrimStateStoreTest {
         assertEquals(session, restored.sessionPath)
         assertFalse(restored.visible)
         assertFalse(restored.running)
+        assertEquals(100, restored.progress?.overallPercent)
+        assertEquals(AutoTrimPhase.COMPLETE, restored.progress?.phase)
         assertEquals(expected.startCandidates, restored.analysis?.startCandidates)
         assertEquals(expected.endCandidates, restored.analysis?.endCandidates)
         assertEquals(expected.startFingerprint, restored.analysis?.startFingerprint)

@@ -18,7 +18,8 @@ import java.nio.file.StandardCopyOption
  */
 internal object AutoTrimStatePersistence {
     private const val MAGIC = 0x43464154 // CFAT
-    private const val VERSION = 1
+    private const val VERSION = 2
+    // Keep the historical file name so version-1 results remain restorable after an app update.
     private const val FILE_NAME = ".auto-trim-state-v1.bin"
     private const val TEMP_SUFFIX = ".tmp"
 
@@ -42,6 +43,8 @@ internal object AutoTrimStatePersistence {
                     output.writeInt(VERSION)
                     output.writeBoolean(state.visible)
                     output.writeBoolean(state.running)
+                    output.writeBoolean(state.progress != null)
+                    state.progress?.let { writeProgress(output, it) }
                     writeNullableString(output, state.error)
                     output.writeBoolean(state.analysis != null)
                     state.analysis?.let { writeAnalysis(output, it) }
@@ -73,15 +76,18 @@ internal object AutoTrimStatePersistence {
         return runCatching {
             DataInputStream(BufferedInputStream(FileInputStream(target))).use { input ->
                 require(input.readInt() == MAGIC) { "Invalid auto-trim state" }
-                require(input.readInt() == VERSION) { "Unsupported auto-trim state version" }
+                val version = input.readInt()
+                require(version in 1..VERSION) { "Unsupported auto-trim state version" }
                 val visible = input.readBoolean()
                 val running = input.readBoolean()
+                val progress = if (version >= 2 && input.readBoolean()) readProgress(input) else null
                 val error = readNullableString(input)
                 val analysis = if (input.readBoolean()) readAnalysis(input) else null
                 AutoTrimUiState(
                     sessionPath = sessionPath,
                     visible = visible,
                     running = running,
+                    progress = progress,
                     analysis = analysis,
                     error = error,
                 )
@@ -92,6 +98,30 @@ internal object AutoTrimStatePersistence {
     fun delete(sessionPath: String) {
         File(sessionPath, FILE_NAME).delete()
         File(sessionPath, FILE_NAME + TEMP_SUFFIX).delete()
+    }
+
+    private fun writeProgress(output: DataOutputStream, progress: AutoTrimProgress) {
+        output.writeUTF(progress.phase.name)
+        output.writeInt(progress.overallPercent)
+        output.writeInt(progress.phasePercent)
+        output.writeLong(progress.elapsedMs)
+        output.writeBoolean(progress.remainingMs != null)
+        progress.remainingMs?.let(output::writeLong)
+    }
+
+    private fun readProgress(input: DataInputStream): AutoTrimProgress {
+        val phase = AutoTrimPhase.valueOf(input.readUTF())
+        val overallPercent = input.readInt().also { require(it in 0..100) }
+        val phasePercent = input.readInt().also { require(it in 0..100) }
+        val elapsedMs = input.readLong().also { require(it >= 0L) }
+        val remainingMs = if (input.readBoolean()) input.readLong().also { require(it >= 0L) } else null
+        return AutoTrimProgress(
+            phase = phase,
+            overallPercent = overallPercent,
+            phasePercent = phasePercent,
+            elapsedMs = elapsedMs,
+            remainingMs = remainingMs,
+        )
     }
 
     private fun writeAnalysis(output: DataOutputStream, analysis: AutoTrimAnalysis) {

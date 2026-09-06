@@ -12,7 +12,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -38,7 +37,6 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import app.clipforge.MainViewModel
 import app.clipforge.TrimEditorState
-import app.clipforge.media.AutoTrimAnalysis
 import app.clipforge.media.AutoTrimAnalyzer
 import app.clipforge.media.AutoTrimCandidate
 import app.clipforge.media.AutoTrimEvidence
@@ -83,7 +81,8 @@ fun AutoTrimEntryButton(
     ) {
         Text(
             when {
-                currentSession && autoState.running -> "前後を自動解析中…"
+                currentSession && autoState.running ->
+                    "前後を自動解析中 ${autoState.progress?.overallPercent ?: 0}%"
                 currentSession && autoState.analysis != null -> "自動解析結果を開く"
                 currentSession && autoState.error != null -> "自動解析を確認"
                 else -> "前後を自動検出"
@@ -219,18 +218,33 @@ private fun AutoTrimSheet(
         Text("候補の「±5秒確認」で境界の前後だけ再生します。", style = MaterialTheme.typography.bodySmall)
 
         if (autoState.running) {
+            val progress = autoState.progress
+            val overallPercent = progress?.overallPercent?.coerceIn(0, 99) ?: 0
             Card(Modifier.fillMaxWidth()) {
                 Column(
                     Modifier.padding(12.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        CircularProgressIndicator(modifier = Modifier.height(28.dp))
-                        Text("前後だけ解析中…")
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Text(progress?.phase?.label ?: "解析を準備中")
+                        Text("$overallPercent%", style = MaterialTheme.typography.titleMedium)
                     }
-                    LinearProgressIndicator(Modifier.fillMaxWidth())
+                    LinearProgressIndicator(
+                        progress = { overallPercent / 100f },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    progress?.let {
+                        Text(
+                            "この工程 ${it.phasePercent}% ・ 経過 ${formatDurationShort(it.elapsedMs)} ・ " +
+                                "残り ${it.remainingMs?.let { remaining -> "約${formatDurationShort(remaining)}" } ?: "計算中"}",
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
                     Text(
-                        "アプリをバックグラウンドにしても解析は継続します。",
+                        "進捗は実際に解析できた動画時間とfingerprint取得数から計算しています。バックグラウンドでも継続します。",
                         style = MaterialTheme.typography.bodySmall,
                     )
                     OutlinedButton(
@@ -370,6 +384,14 @@ private fun formatAutoTime(ms: Long): String {
     } else {
         String.format(Locale.US, "%02d:%02d.%03d", minutes, seconds, millis)
     }
+}
+
+private fun formatDurationShort(ms: Long): String {
+    val totalSeconds = (ms.coerceAtLeast(0L) / 1_000L).coerceAtLeast(0L)
+    if (totalSeconds < 60L) return "${totalSeconds}秒"
+    val minutes = totalSeconds / 60L
+    val seconds = totalSeconds % 60L
+    return if (seconds == 0L) "${minutes}分" else String.format(Locale.JAPAN, "%d分%02d秒", minutes, seconds)
 }
 
 private const val PREVIEW_RADIUS_MS = 5_000L
