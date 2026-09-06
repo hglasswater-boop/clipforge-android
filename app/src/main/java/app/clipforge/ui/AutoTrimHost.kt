@@ -40,6 +40,7 @@ import app.clipforge.TrimEditorState
 import app.clipforge.media.AutoTrimAnalyzer
 import app.clipforge.media.AutoTrimCandidate
 import app.clipforge.media.AutoTrimEvidence
+import app.clipforge.media.AutoTrimRangeSettings
 import app.clipforge.media.AutoTrimSide
 import app.clipforge.media.AutoTrimStateStore
 import app.clipforge.media.AutoTrimUiState
@@ -55,7 +56,6 @@ fun AutoTrimEntryButton(
     editor: TrimEditorState,
     enabled: Boolean,
 ) {
-    val context = LocalContext.current
     val autoState by AutoTrimStateStore.state.collectAsStateWithLifecycle()
     val currentSession = autoState.sessionPath == editor.sessionPath
     val hasCurrentState = currentSession && (
@@ -67,13 +67,7 @@ fun AutoTrimEntryButton(
             if (hasCurrentState) {
                 AutoTrimStateStore.show(editor.sessionPath)
             } else {
-                AutoTrimAnalysisService.start(
-                    context = context.applicationContext,
-                    sourceUri = editor.sourceUri,
-                    sessionPath = editor.sessionPath,
-                    localInputPath = editor.localPath,
-                    durationMs = editor.durationMs,
-                )
+                AutoTrimStateStore.open(editor.sessionPath)
             }
         },
         enabled = enabled,
@@ -121,6 +115,10 @@ private fun AutoTrimSheet(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val analyzer = remember(context) { AutoTrimAnalyzer(context.applicationContext) }
+    val rangeSettings = remember(context) { AutoTrimRangeSettings(context.applicationContext) }
+    var selectedEdgeWindowMs by remember(editor.sessionPath) {
+        mutableStateOf(rangeSettings.loadEdgeWindowMs())
+    }
     var notice by remember(editor.sessionPath) { mutableStateOf<String?>(null) }
     var previewStopMs by remember(editor.sessionPath) { mutableStateOf<Long?>(null) }
 
@@ -148,16 +146,24 @@ private fun AutoTrimSheet(
         }
     }
 
+    fun selectRange(value: Long) {
+        if (autoState.running) return
+        selectedEdgeWindowMs = value
+        rangeSettings.saveEdgeWindowMs(value)
+    }
+
     fun startAnalysis() {
         player.pause()
         previewStopMs = null
         notice = null
+        rangeSettings.saveEdgeWindowMs(selectedEdgeWindowMs)
         AutoTrimAnalysisService.start(
             context = context.applicationContext,
             sourceUri = editor.sourceUri,
             sessionPath = editor.sessionPath,
             localInputPath = editor.localPath,
             durationMs = editor.durationMs,
+            edgeWindowMs = selectedEdgeWindowMs,
         )
     }
 
@@ -204,6 +210,61 @@ private fun AutoTrimSheet(
             "先頭と末尾だけを解析します。解析はバックグラウンドでも継続し、戻ったときに同じ結果画面へ復帰します。",
             style = MaterialTheme.typography.bodyMedium,
         )
+
+        Card(Modifier.fillMaxWidth()) {
+            Column(
+                Modifier.padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text("解析範囲", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "先頭・末尾それぞれを何分調べるか選びます。通常は5分がおすすめです。",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    RangeChoiceButton(
+                        minutes = 1,
+                        selected = selectedEdgeWindowMs == 1 * AutoTrimRangeSettings.ONE_MINUTE_MS,
+                        enabled = !autoState.running,
+                        onClick = { selectRange(1 * AutoTrimRangeSettings.ONE_MINUTE_MS) },
+                        modifier = Modifier.weight(1f),
+                    )
+                    RangeChoiceButton(
+                        minutes = 3,
+                        selected = selectedEdgeWindowMs == 3 * AutoTrimRangeSettings.ONE_MINUTE_MS,
+                        enabled = !autoState.running,
+                        onClick = { selectRange(3 * AutoTrimRangeSettings.ONE_MINUTE_MS) },
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    RangeChoiceButton(
+                        minutes = 5,
+                        selected = selectedEdgeWindowMs == 5 * AutoTrimRangeSettings.ONE_MINUTE_MS,
+                        enabled = !autoState.running,
+                        onClick = { selectRange(5 * AutoTrimRangeSettings.ONE_MINUTE_MS) },
+                        modifier = Modifier.weight(1f),
+                    )
+                    RangeChoiceButton(
+                        minutes = 10,
+                        selected = selectedEdgeWindowMs == 10 * AutoTrimRangeSettings.ONE_MINUTE_MS,
+                        enabled = !autoState.running,
+                        onClick = { selectRange(10 * AutoTrimRangeSettings.ONE_MINUTE_MS) },
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+                Text(
+                    "選択中: 前後それぞれ ${selectedEdgeWindowMs / AutoTrimRangeSettings.ONE_MINUTE_MS}分",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            }
+        }
 
         AndroidView(
             factory = { ctx ->
@@ -300,6 +361,33 @@ private fun AutoTrimSheet(
             }
         }
         Spacer(Modifier.height(24.dp))
+    }
+}
+
+@Composable
+private fun RangeChoiceButton(
+    minutes: Int,
+    selected: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    if (selected) {
+        Button(
+            onClick = onClick,
+            enabled = enabled,
+            modifier = modifier,
+        ) {
+            Text("${minutes}分")
+        }
+    } else {
+        OutlinedButton(
+            onClick = onClick,
+            enabled = enabled,
+            modifier = modifier,
+        ) {
+            Text("${minutes}分")
+        }
     }
 }
 
