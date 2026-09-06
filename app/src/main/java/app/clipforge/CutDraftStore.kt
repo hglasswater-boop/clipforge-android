@@ -79,7 +79,8 @@ internal fun CutDraft.restoreInto(editor: TrimEditorState): TrimEditorState {
 internal fun cutDraftKey(sourceUri: String, sourceName: String): String {
     val digest = MessageDigest.getInstance("SHA-256")
         .digest("$sourceUri\n$sourceName".toByteArray(StandardCharsets.UTF_8))
-    return buildString(prefix = "draft_") {
+    return buildString {
+        append("draft_")
         digest.forEach { byte -> append("%02x".format(byte.toInt() and 0xff)) }
     }
 }
