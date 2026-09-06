@@ -12,6 +12,8 @@ import android.net.Uri
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.system.Os
+import android.system.OsConstants
 import app.clipforge.MainActivity
 import app.clipforge.media.CutMode
 import app.clipforge.media.FfmpegMediaEngine
@@ -27,6 +29,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import java.io.IOException
 
 class ClipForgeProcessingService : Service() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -60,6 +63,7 @@ class ClipForgeProcessingService : Service() {
         if (processingJob?.isActive == true) return START_REDELIVER_INTENT
         cancellationRequested = false
         timeoutFailure = null
+        val redelivered = flags and START_FLAG_REDELIVERY != 0
 
         val title = when (request.action) {
             ACTION_PREPARE_CUT -> "カット編集を準備中"
@@ -87,6 +91,7 @@ class ClipForgeProcessingService : Service() {
                 mediaEngine = mediaEngine,
             )
             try {
+                if (redelivered) resetOutputForRedelivery(request, title)
                 when (request.action) {
                     ACTION_PREPARE_CUT -> prepareCut(request, title, pipeline)
                     ACTION_CONCAT -> concat(request, title, pipeline)
@@ -199,6 +204,22 @@ class ClipForgeProcessingService : Service() {
             displayName = sourceName,
             sizeBytes = sourceSize,
         )
+    }
+
+    private fun resetOutputForRedelivery(request: Intent, title: String) {
+        val uriString = request.getStringExtra(EXTRA_OUTPUT_URI) ?: return
+        updateProgress(title, "バックグラウンド処理を再開しています")
+        val uri = Uri.parse(uriString)
+        val descriptor = contentResolver.openFileDescriptor(uri, "rw")
+            ?: throw IOException("再開用の保存先を開けません")
+        descriptor.use {
+            try {
+                Os.ftruncate(it.fileDescriptor, 0L)
+                Os.lseek(it.fileDescriptor, 0L, OsConstants.SEEK_SET)
+            } catch (error: Throwable) {
+                throw IOException("再開用の保存先を初期化できません", error)
+            }
+        }
     }
 
     override fun onTimeout(startId: Int, fgsType: Int) {
