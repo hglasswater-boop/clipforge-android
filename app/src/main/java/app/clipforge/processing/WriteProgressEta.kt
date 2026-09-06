@@ -15,6 +15,7 @@ internal class WriteProgressEta(
     private var activePhase: String? = null
     private var smoothedEtaMs: Double? = null
 
+    @Synchronized
     fun decorate(message: String): String {
         val phase = phaseOf(message)
         val percent = WRITE_PERCENT.find(message)
@@ -36,6 +37,7 @@ internal class WriteProgressEta(
         return "$message ・ 残り ${formatRemainingTime(etaMs)}"
     }
 
+    @Synchronized
     fun reset() {
         activePhase = null
         resetSamples()
