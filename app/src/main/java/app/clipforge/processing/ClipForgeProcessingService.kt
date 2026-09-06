@@ -5,11 +5,16 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.net.Uri
+import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.system.Os
+import android.system.OsConstants
 import app.clipforge.MainActivity
 import app.clipforge.media.CutMode
 import app.clipforge.media.FfmpegMediaEngine
@@ -25,12 +30,14 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import java.io.IOException
 
 class ClipForgeProcessingService : Service() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var processingJob: Job? = null
     private var wakeLock: PowerManager.WakeLock? = null
     @Volatile private var cancellationRequested = false
+    @Volatile private var timeoutFailure: String? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -56,6 +63,8 @@ class ClipForgeProcessingService : Service() {
 
         if (processingJob?.isActive == true) return START_NOT_STICKY
         cancellationRequested = false
+        timeoutFailure = null
+        val redelivered = flags and START_FLAG_REDELIVERY != 0
 
         val title = when (request.action) {
             ACTION_PREPARE_CUT -> "カット編集を準備中"
@@ -65,8 +74,7 @@ class ClipForgeProcessingService : Service() {
         }
         val initialPercent = if (request.action == ACTION_CUT) 0 else null
         updateProgress(title, "処理を準備しています", initialPercent)
-        startForeground(
-            NOTIFICATION_ID,
+        startProcessingForeground(
             buildNotification(title, "処理を準備しています", true, initialPercent),
         )
         acquireWakeLock()
@@ -84,27 +92,34 @@ class ClipForgeProcessingService : Service() {
                 mediaEngine = mediaEngine,
             )
             try {
+                if (redelivered) resetOutputForRedelivery(request, title)
                 when (request.action) {
                     ACTION_PREPARE_CUT -> prepareCut(request, title, pipeline)
                     ACTION_CONCAT -> concat(request, title, pipeline)
                     ACTION_CUT -> cut(request, title, multiCutExporter)
                 }
             } catch (error: Throwable) {
-                if (cancellationRequested || error is CancellationException) {
-                    finishCancelled("処理をキャンセルしました")
-                } else {
-                    val detail = error.message?.takeIf { it.isNotBlank() } ?: error.javaClass.simpleName
-                    finishFailure("処理に失敗しました: $detail")
+                val timeoutMessage = timeoutFailure
+                when {
+                    timeoutMessage != null -> finishFailure(timeoutMessage)
+                    cancellationRequested || error is CancellationException -> {
+                        finishCancelled("処理をキャンセルしました")
+                    }
+                    else -> {
+                        val detail = error.message?.takeIf { it.isNotBlank() } ?: error.javaClass.simpleName
+                        finishFailure("処理に失敗しました: $detail")
+                    }
                 }
             } finally {
                 releaseOutputGrant(request.getStringExtra(EXTRA_OUTPUT_URI))
                 releaseWakeLock()
                 cancellationRequested = false
+                timeoutFailure = null
                 processingJob = null
-                stopSelf(startId)
+                stopSelf()
             }
         }
-        return START_NOT_STICKY
+        return START_REDELIVER_INTENT
     }
 
     private suspend fun prepareCut(
@@ -192,9 +207,46 @@ class ClipForgeProcessingService : Service() {
         )
     }
 
+    private fun resetOutputForRedelivery(request: Intent, title: String) {
+        val uriString = request.getStringExtra(EXTRA_OUTPUT_URI) ?: return
+        updateProgress(title, "バックグラウンド処理を再開しています")
+        val uri = Uri.parse(uriString)
+
+        if (isXFilesRemoteOutput(uri)) {
+            val values = ContentValues().apply { put(REMOTE_TRUNCATE_KEY, true) }
+            val updated = contentResolver.update(uri, values, null, null)
+            if (updated != 1) throw IOException("SMB保存先を再開用に初期化できません")
+            return
+        }
+
+        val descriptor = contentResolver.openFileDescriptor(uri, "rw")
+            ?: throw IOException("再開用の保存先を開けません")
+        descriptor.use {
+            try {
+                Os.ftruncate(it.fileDescriptor, 0L)
+                Os.lseek(it.fileDescriptor, 0L, OsConstants.SEEK_SET)
+            } catch (error: Throwable) {
+                throw IOException("再開用の保存先を初期化できません", error)
+            }
+        }
+    }
+
+    private fun isXFilesRemoteOutput(uri: Uri): Boolean =
+        uri.authority == XFILES_REMOTE_PROVIDER_AUTHORITY && uri.getQueryParameter("mode") == "output"
+
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        val message = "バックグラウンド動画処理の上限時間に達したため停止しました"
+        timeoutFailure = message
+        finishFailure(message)
+        FFmpegKit.cancel()
+        processingJob?.cancel(CancellationException("Foreground media processing timed out"))
+        releaseWakeLock()
+        stopSelf()
+    }
+
     override fun onDestroy() {
         if (processingJob?.isActive == true) {
-            cancellationRequested = true
+            if (timeoutFailure == null) cancellationRequested = true
             FFmpegKit.cancel()
             processingJob?.cancel()
         }
@@ -243,6 +295,19 @@ class ClipForgeProcessingService : Service() {
         stopForeground(STOP_FOREGROUND_REMOVE)
         getSystemService(NotificationManager::class.java)
             .notify(NOTIFICATION_ID, buildNotification("ClipForge", message, false, null))
+    }
+
+    @Suppress("NewApi")
+    private fun startProcessingForeground(notification: Notification) {
+        if (Build.VERSION.SDK_INT >= 35) {
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROCESSING,
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
     }
 
     private fun buildNotification(
@@ -353,6 +418,8 @@ class ClipForgeProcessingService : Service() {
         private const val EXTRA_CUT_STARTS = "cutStarts"
         private const val EXTRA_CUT_ENDS = "cutEnds"
         private const val EXTRA_CUT_MODE = "cutMode"
+        private const val XFILES_REMOTE_PROVIDER_AUTHORITY = "app.local1st.files.remotefileprovider"
+        private const val REMOTE_TRUNCATE_KEY = "truncate"
 
         fun startPrepareCut(context: Context, source: PickedVideo) {
             val intent = Intent(context, ClipForgeProcessingService::class.java)
