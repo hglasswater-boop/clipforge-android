@@ -61,12 +61,14 @@ class SceneChangeDetector {
         durationMs: Long,
         startMs: Long,
         endMs: Long,
+        onProgress: (Double) -> Unit = {},
     ): SceneDetectionResult = withContext(Dispatchers.IO) {
         detect(
             inputArguments = listOf("-ss", seconds(startMs), "-i", path),
             durationMs = durationMs,
             startMs = startMs,
             endMs = endMs,
+            onProgress = onProgress,
         )
     }
 
@@ -75,12 +77,14 @@ class SceneChangeDetector {
         durationMs: Long,
         startMs: Long,
         endMs: Long,
+        onProgress: (Double) -> Unit = {},
     ): SceneDetectionResult = withContext(Dispatchers.IO) {
         detect(
             inputArguments = listOf("-ss", seconds(startMs), "-fd", fd.toString(), "-i", "fd:"),
             durationMs = durationMs,
             startMs = startMs,
             endMs = endMs,
+            onProgress = onProgress,
         )
     }
 
@@ -89,11 +93,13 @@ class SceneChangeDetector {
         durationMs: Long,
         startMs: Long,
         endMs: Long,
+        onProgress: (Double) -> Unit,
     ): SceneDetectionResult {
         val safeDuration = durationMs.coerceAtLeast(1L)
         val safeStart = startMs.coerceIn(0L, safeDuration)
         val safeEnd = endMs.coerceIn(safeStart, safeDuration)
         if (safeEnd <= safeStart) {
+            onProgress(1.0)
             return SceneDetectionResult(emptyList(), safeStart, safeEnd)
         }
 
@@ -113,7 +119,11 @@ class SceneChangeDetector {
             "-f", "null",
             "-",
         )
-        val session = executeCancellableFfmpeg(arguments)
+        val session = executeCancellableFfmpeg(
+            arguments = arguments,
+            expectedDurationMs = safeEnd - safeStart,
+            onProgress = onProgress,
+        )
         if (!ReturnCode.isSuccess(session.returnCode)) {
             throw MediaCommandException(
                 session.allLogsAsString.ifBlank { "シーン候補の解析に失敗しました" },
