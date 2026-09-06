@@ -18,6 +18,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import app.clipforge.ui.AutoTrimHost
 import app.clipforge.ui.ClipForgeApp
 import app.clipforge.ui.ClipForgeDirectOutputHost
 import app.clipforge.update.ClipForgeUpdateHost
@@ -41,6 +42,7 @@ class MainActivity : ComponentActivity() {
                         ClipForgeApp(mainViewModel)
                     }
                     ClipForgeDirectOutputHost(mainViewModel)
+                    AutoTrimHost(mainViewModel)
                     ClipForgeUpdateHost(showEntryButton = mainState.trimEditor == null)
                 }
             }
