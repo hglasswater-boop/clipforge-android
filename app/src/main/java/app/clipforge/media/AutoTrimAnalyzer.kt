@@ -49,22 +49,41 @@ class AutoTrimAnalyzer(context: Context) {
         sourceUri: String,
         localInputPath: String?,
         durationMs: Long,
+        onProgress: (AutoTrimPhase, Int) -> Unit = { _, _ -> },
     ): AutoTrimAnalysis = withContext(Dispatchers.IO) {
         require(durationMs > 1L) { "動画の長さを取得できません" }
+        onProgress(AutoTrimPhase.PREPARING, 1)
         val edgeWindowMs = edgeWindowFor(durationMs)
         val startRange = MediaSegment(0L, edgeWindowMs)
         val endRange = MediaSegment((durationMs - edgeWindowMs).coerceAtLeast(0L), durationMs)
 
+        onProgress(AutoTrimPhase.START_SCENE, 3)
         val startScenes = detectScenes(sourceUri, localInputPath, durationMs, startRange)
-        val endScenes = detectScenes(sourceUri, localInputPath, durationMs, endRange)
-        val startAudio = detectAudio(sourceUri, localInputPath, durationMs, startRange)
-        val endAudio = detectAudio(sourceUri, localInputPath, durationMs, endRange)
+        onProgress(AutoTrimPhase.START_SCENE, 17)
 
+        onProgress(AutoTrimPhase.END_SCENE, 18)
+        val endScenes = detectScenes(sourceUri, localInputPath, durationMs, endRange)
+        onProgress(AutoTrimPhase.END_SCENE, 32)
+
+        onProgress(AutoTrimPhase.START_AUDIO, 33)
+        val startAudio = detectAudio(sourceUri, localInputPath, durationMs, startRange)
+        onProgress(AutoTrimPhase.START_AUDIO, 47)
+
+        onProgress(AutoTrimPhase.END_AUDIO, 48)
+        val endAudio = detectAudio(sourceUri, localInputPath, durationMs, endRange)
+        onProgress(AutoTrimPhase.END_AUDIO, 62)
+
+        onProgress(AutoTrimPhase.VISUAL_FINGERPRINT, 63)
         val visual = sampleVisualFingerprints(
             sourceUri = sourceUri,
             localInputPath = localInputPath,
             durationMs = durationMs,
             edgeWindowMs = edgeWindowMs,
+            onProgress = { completed, total ->
+                val fraction = if (total <= 0) 1.0 else completed.toDouble() / total.toDouble()
+                val percent = 63 + (fraction * 27.0).toInt()
+                onProgress(AutoTrimPhase.VISUAL_FINGERPRINT, percent.coerceIn(63, 90))
+            },
         )
         val startFingerprint = EdgeFingerprintSnapshot(
             side = AutoTrimSide.START,
@@ -89,11 +108,14 @@ class AutoTrimAnalyzer(context: Context) {
             }.sortedBy(AudioFingerprintPoint::offsetFromEdgeMs),
         )
 
+        onProgress(AutoTrimPhase.KNOWN_CLIP_MATCH, 91)
         val known = knownStore.load()
         val startKnown = bestKnownMatch(startFingerprint, known, durationMs)
         val endKnown = bestKnownMatch(endFingerprint, known, durationMs)
+        onProgress(AutoTrimPhase.KNOWN_CLIP_MATCH, 96)
 
-        AutoTrimAnalysis(
+        onProgress(AutoTrimPhase.RANKING, 97)
+        val result = AutoTrimAnalysis(
             startCandidates = rankAutoTrimCandidates(
                 side = AutoTrimSide.START,
                 durationMs = durationMs,
@@ -117,6 +139,8 @@ class AutoTrimAnalyzer(context: Context) {
             scannedStart = startRange,
             scannedEnd = endRange,
         )
+        onProgress(AutoTrimPhase.RANKING, 99)
+        result
     }
 
     suspend fun rememberConfirmed(
@@ -225,6 +249,7 @@ class AutoTrimAnalyzer(context: Context) {
         localInputPath: String?,
         durationMs: Long,
         edgeWindowMs: Long,
+        onProgress: (completed: Int, total: Int) -> Unit,
     ): Pair<List<VisualFingerprintPoint>, List<VisualFingerprintPoint>> {
         val retriever = MediaMetadataRetriever()
         return try {
@@ -234,19 +259,31 @@ class AutoTrimAnalyzer(context: Context) {
                 retriever.setDataSource(appContext, Uri.parse(sourceUri))
             }
             val intervalMs = max(MIN_VISUAL_SAMPLE_INTERVAL_MS, edgeWindowMs / MAX_VISUAL_SAMPLES_PER_EDGE)
+            val offsets = buildList {
+                var offset = 0L
+                while (offset <= edgeWindowMs) {
+                    add(offset)
+                    if (edgeWindowMs - offset < intervalMs) break
+                    offset += intervalMs
+                }
+            }
+            val totalFrames = (offsets.size * 2).coerceAtLeast(1)
+            var completedFrames = 0
             val start = mutableListOf<VisualFingerprintPoint>()
             val end = mutableListOf<VisualFingerprintPoint>()
-            var offset = 0L
-            while (offset <= edgeWindowMs) {
+            offsets.forEach { offset ->
                 frameHash(retriever, offset)?.let { hash ->
                     start += VisualFingerprintPoint(offsetFromEdgeMs = offset, hash = hash)
                 }
+                completedFrames += 1
+                onProgress(completedFrames, totalFrames)
+
                 val endTime = (durationMs - offset).coerceAtLeast(0L)
                 frameHash(retriever, endTime)?.let { hash ->
                     end += VisualFingerprintPoint(offsetFromEdgeMs = offset, hash = hash)
                 }
-                if (edgeWindowMs - offset < intervalMs) break
-                offset += intervalMs
+                completedFrames += 1
+                onProgress(completedFrames, totalFrames)
             }
             start to end
         } catch (_: Throwable) {
