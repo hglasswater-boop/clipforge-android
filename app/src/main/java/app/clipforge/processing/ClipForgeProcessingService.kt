@@ -22,7 +22,6 @@ import app.clipforge.media.MediaSegment
 import app.clipforge.workflow.ExternalEditPipeline
 import app.clipforge.workflow.MultiCutExporter
 import app.clipforge.workflow.PickedVideo
-import com.arthenica.ffmpegkit.FFmpegKit
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -56,7 +55,8 @@ class ClipForgeProcessingService : Service() {
             }
             cancellationRequested = true
             updateProgress("ClipForge", "キャンセルしています")
-            FFmpegKit.cancel()
+            // FfmpegMediaEngine converts coroutine cancellation into FFmpegKit.cancel(sessionId).
+            // Never cancel every FFmpeg session in the process, because auto-analysis may be active.
             activeJob.cancel(CancellationException("Cancelled by user"))
             return START_NOT_STICKY
         }
@@ -238,7 +238,6 @@ class ClipForgeProcessingService : Service() {
         val message = "バックグラウンド動画処理の上限時間に達したため停止しました"
         timeoutFailure = message
         finishFailure(message)
-        FFmpegKit.cancel()
         processingJob?.cancel(CancellationException("Foreground media processing timed out"))
         releaseWakeLock()
         stopSelf()
@@ -247,7 +246,6 @@ class ClipForgeProcessingService : Service() {
     override fun onDestroy() {
         if (processingJob?.isActive == true) {
             if (timeoutFailure == null) cancellationRequested = true
-            FFmpegKit.cancel()
             processingJob?.cancel()
         }
         releaseWakeLock()
