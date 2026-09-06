@@ -68,6 +68,6 @@ class SceneChangeDetectorTest {
         assertTrue(graph.startsWith("[0:V:0]"))
         assertTrue(graph.contains("split=2[progress_src][scene_src]"))
         assertTrue(graph.contains("[progress_src]fps=1[progress]"))
-        assertTrue(graph.contains("[scene_src]select='gt(scene,0.35)',showinfo[changes]"))
+        assertTrue(graph.contains("[scene_src]select='gt(scene,0.35)',showinfo,nullsink"))
     }
 }
