@@ -36,6 +36,7 @@ private data class SceneFilterSpec(
 
 private val showInfoPtsRegex = Regex("""pts_time:([0-9]+(?:\.[0-9]+)?)""")
 private val blackStartRegex = Regex("""black_start:([0-9]+(?:\.[0-9]+)?)""")
+private val blackEndRegex = Regex("""black_end:([0-9]+(?:\.[0-9]+)?)""")
 
 internal fun parseSceneDetectionLog(log: String, offsetMs: Long): List<SceneMarker> = buildList {
     log.lineSequence().forEach { line ->
@@ -50,6 +51,14 @@ internal fun parseSceneDetectionLog(log: String, offsetMs: Long): List<SceneMark
                 }
         }
         blackStartRegex.find(line)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.toDoubleOrNull()
+            ?.takeIf { it.isFinite() && it >= 0.0 }
+            ?.let { seconds ->
+                add(SceneMarker(offsetMs + (seconds * 1000.0).roundToLong(), SceneMarkerKind.BLACK))
+            }
+        blackEndRegex.find(line)
             ?.groupValues
             ?.getOrNull(1)
             ?.toDoubleOrNull()
