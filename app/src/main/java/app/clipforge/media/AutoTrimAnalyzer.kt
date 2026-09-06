@@ -6,15 +6,17 @@ import android.net.Uri
 import android.os.ParcelFileDescriptor
 import android.system.Os
 import android.system.OsConstants
-import com.arthenica.ffmpegkit.FFmpegKit
 import com.arthenica.ffmpegkit.ReturnCode
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.IOException
 import java.util.Locale
+import kotlin.coroutines.coroutineContext
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -191,7 +193,8 @@ class AutoTrimAnalyzer(context: Context) {
                 )
             }
         }
-    }.getOrElse {
+    }.getOrElse { error ->
+        if (error is CancellationException) throw error
         SceneDetectionResult(emptyList(), range.startMs, range.endMs)
     }
 
@@ -218,9 +221,12 @@ class AutoTrimAnalyzer(context: Context) {
                 )
             }
         }
-    }.getOrElse { AudioFeatureResult(emptyList(), emptyList()) }
+    }.getOrElse { error ->
+        if (error is CancellationException) throw error
+        AudioFeatureResult(emptyList(), emptyList())
+    }
 
-    private fun sampleVisualFingerprints(
+    private suspend fun sampleVisualFingerprints(
         sourceUri: String,
         localInputPath: String?,
         durationMs: Long,
@@ -238,9 +244,11 @@ class AutoTrimAnalyzer(context: Context) {
             val end = mutableListOf<VisualFingerprintPoint>()
             var offset = 0L
             while (offset <= edgeWindowMs) {
+                coroutineContext.ensureActive()
                 frameHash(retriever, offset)?.let { hash ->
                     start += VisualFingerprintPoint(offsetFromEdgeMs = offset, hash = hash)
                 }
+                coroutineContext.ensureActive()
                 val endTime = (durationMs - offset).coerceAtLeast(0L)
                 frameHash(retriever, endTime)?.let { hash ->
                     end += VisualFingerprintPoint(offsetFromEdgeMs = offset, hash = hash)
@@ -249,6 +257,8 @@ class AutoTrimAnalyzer(context: Context) {
                 offset += intervalMs
             }
             start to end
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (_: Throwable) {
             emptyList<VisualFingerprintPoint>() to emptyList()
         } finally {
@@ -349,7 +359,7 @@ private class AudioFeatureDetector {
         )
     }
 
-    private fun detect(
+    private suspend fun detect(
         inputArguments: List<String>,
         durationMs: Long,
         startMs: Long,
@@ -373,7 +383,7 @@ private class AudioFeatureDetector {
                 "silencedetect=n=-45dB:d=0.35",
             "-f", "null", "-",
         )
-        val session = FFmpegKit.executeWithArguments(arguments.toTypedArray())
+        val session = executeCancellableFfmpeg(arguments)
         if (!ReturnCode.isSuccess(session.returnCode)) {
             return AudioFeatureResult(emptyList(), emptyList())
         }
