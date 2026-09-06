@@ -14,7 +14,6 @@ import android.os.PowerManager
 import app.clipforge.MainActivity
 import app.clipforge.media.AutoTrimAnalyzer
 import app.clipforge.media.AutoTrimStateStore
-import com.arthenica.ffmpegkit.FFmpegKit
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -28,6 +27,7 @@ class AutoTrimAnalysisService : Service() {
     private var analysisJob: Job? = null
     private var wakeLock: PowerManager.WakeLock? = null
     @Volatile private var cancellationRequested = false
+    @Volatile private var timeoutFailure: String? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -38,7 +38,8 @@ class AutoTrimAnalysisService : Service() {
         val request = intent ?: return START_NOT_STICKY
         if (request.action == ACTION_CANCEL) {
             cancellationRequested = true
-            FFmpegKit.cancel()
+            // The active FFmpeg stage is cancelled by its coroutine using its own session id.
+            // Never call FFmpegKit.cancel() here because that would also stop exports/concats.
             analysisJob?.cancel(CancellationException("Auto trim cancelled"))
             return START_NOT_STICKY
         }
@@ -51,6 +52,7 @@ class AutoTrimAnalysisService : Service() {
         require(durationMs > 0L) { "動画の長さが不正です" }
 
         cancellationRequested = false
+        timeoutFailure = null
         AutoTrimStateStore.begin(sessionPath)
         startAnalysisForeground(
             buildNotification(
@@ -71,18 +73,27 @@ class AutoTrimAnalysisService : Service() {
                 AutoTrimStateStore.ready(sessionPath, analysis)
                 finishNotification("自動解析が完了しました")
             } catch (error: Throwable) {
-                if (cancellationRequested || error is CancellationException) {
-                    AutoTrimStateStore.cancelled(sessionPath)
-                    finishNotification("自動解析をキャンセルしました")
-                } else {
-                    val detail = error.message?.takeIf { it.isNotBlank() } ?: error.javaClass.simpleName
-                    AutoTrimStateStore.failure(sessionPath, detail)
-                    finishNotification("自動解析に失敗しました: $detail")
+                val timeoutMessage = timeoutFailure
+                when {
+                    timeoutMessage != null -> {
+                        AutoTrimStateStore.failure(sessionPath, timeoutMessage)
+                        finishNotification(timeoutMessage)
+                    }
+                    cancellationRequested || error is CancellationException -> {
+                        AutoTrimStateStore.cancelled(sessionPath)
+                        finishNotification("自動解析をキャンセルしました")
+                    }
+                    else -> {
+                        val detail = error.message?.takeIf { it.isNotBlank() } ?: error.javaClass.simpleName
+                        AutoTrimStateStore.failure(sessionPath, detail)
+                        finishNotification("自動解析に失敗しました: $detail")
+                    }
                 }
             } finally {
                 releaseWakeLock()
                 analysisJob = null
                 cancellationRequested = false
+                timeoutFailure = null
                 stopSelf()
             }
         }
@@ -90,8 +101,7 @@ class AutoTrimAnalysisService : Service() {
     }
 
     override fun onTimeout(startId: Int, fgsType: Int) {
-        cancellationRequested = true
-        FFmpegKit.cancel()
+        timeoutFailure = "バックグラウンド自動解析の上限時間に達したため停止しました"
         analysisJob?.cancel(CancellationException("Auto trim foreground timeout"))
         releaseWakeLock()
         stopSelf(startId)
@@ -99,8 +109,7 @@ class AutoTrimAnalysisService : Service() {
 
     override fun onDestroy() {
         if (analysisJob?.isActive == true) {
-            cancellationRequested = true
-            FFmpegKit.cancel()
+            if (timeoutFailure == null) cancellationRequested = true
             analysisJob?.cancel()
         }
         releaseWakeLock()

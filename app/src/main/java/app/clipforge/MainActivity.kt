@@ -16,15 +16,20 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import app.clipforge.media.AutoTrimStateStore
+import app.clipforge.processing.AutoTrimAnalysisService
 import app.clipforge.ui.AutoTrimEntryButton
 import app.clipforge.ui.AutoTrimHost
 import app.clipforge.ui.ClipForgeApp
 import app.clipforge.ui.ClipForgeDirectOutputHost
 import app.clipforge.update.ClipForgeUpdateHost
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -35,6 +40,30 @@ class MainActivity : ComponentActivity() {
             val mainViewModel: MainViewModel = viewModel()
             val mainState by mainViewModel.uiState.collectAsStateWithLifecycle()
             val dark = isSystemInDarkTheme()
+
+            LaunchedEffect(mainState.trimEditor?.sessionPath) {
+                val editor = mainState.trimEditor ?: return@LaunchedEffect
+                val restored = withContext(Dispatchers.IO) {
+                    AutoTrimStateStore.restore(editor.sessionPath)
+                }
+                val autoState = AutoTrimStateStore.state.value
+                if (
+                    restored &&
+                    autoState.sessionPath == editor.sessionPath &&
+                    autoState.running
+                ) {
+                    // START_REDELIVER_INTENT normally revives the service after process pressure.
+                    // Starting again here is an idempotent self-heal for a cold Activity restore.
+                    AutoTrimAnalysisService.start(
+                        context = applicationContext,
+                        sourceUri = editor.sourceUri,
+                        sessionPath = editor.sessionPath,
+                        localInputPath = editor.localPath,
+                        durationMs = editor.durationMs,
+                    )
+                }
+            }
+
             MaterialTheme(colorScheme = if (dark) darkColorScheme() else lightColorScheme()) {
                 Box(Modifier.fillMaxSize()) {
                     Column(
