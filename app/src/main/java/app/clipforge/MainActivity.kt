@@ -41,16 +41,15 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         requestNotificationPermissionOnce()
+
+        // This is deliberately before MainViewModel construction. Its pipeline prunes stale cache
+        // sessions in init, so the active marker must refresh the live directory first.
+        ActiveCutSessionStore.restore(cacheDir)
+
         setContent {
             val mainViewModel: MainViewModel = viewModel()
             val mainState by mainViewModel.uiState.collectAsStateWithLifecycle()
             val dark = isSystemInDarkTheme()
-
-            LaunchedEffect(Unit) {
-                withContext(Dispatchers.IO) {
-                    ActiveCutSessionStore.restore(applicationContext.cacheDir)
-                }
-            }
 
             LaunchedEffect(Unit) {
                 ActiveCutSessionStore.state.collectLatest { active ->
