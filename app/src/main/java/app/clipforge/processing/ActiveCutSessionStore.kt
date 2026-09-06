@@ -32,6 +32,9 @@ data class ActiveCutSessionSnapshot(
  * database/pointer and means deleting the session naturally makes the record invalid. The
  * process-local StateFlow exists only to notify the UI when a background export returns the
  * session to EDITING after an Activity/process recreation.
+ *
+ * Marker I/O is intentionally best-effort: a recovery-metadata failure must never make the
+ * actual media operation fail.
  */
 object ActiveCutSessionStore {
     private val _state = MutableStateFlow<ActiveCutSessionSnapshot?>(null)
@@ -46,7 +49,7 @@ object ActiveCutSessionStore {
         durationMs: Long,
         thumbnailPaths: List<String>,
     ) {
-        require(durationMs > 0L) { "durationMs must be > 0" }
+        if (durationMs <= 0L) return
         val snapshot = ActiveCutSessionSnapshot(
             sourceUri = sourceUri,
             sourceName = sourceName,
@@ -57,7 +60,7 @@ object ActiveCutSessionStore {
             phase = ActiveCutSessionPhase.EDITING,
             updatedAtEpochMs = System.currentTimeMillis(),
         )
-        write(snapshot)
+        runCatching { write(snapshot) }
         _state.value = snapshot
     }
 
@@ -74,8 +77,8 @@ object ActiveCutSessionStore {
     @Synchronized
     fun clear(sessionPath: String? = _state.value?.sessionPath) {
         val path = sessionPath ?: return
-        markerFile(File(path)).delete()
-        temporaryMarkerFile(File(path)).delete()
+        runCatching { markerFile(File(path)).delete() }
+        runCatching { temporaryMarkerFile(File(path)).delete() }
         if (_state.value?.sessionPath == path) _state.value = null
     }
 
@@ -117,7 +120,7 @@ object ActiveCutSessionStore {
             phase = phase,
             updatedAtEpochMs = System.currentTimeMillis(),
         )
-        write(updated)
+        runCatching { write(updated) }
         runCatching { sessionDir.setLastModified(updated.updatedAtEpochMs) }
         _state.value = updated
     }
@@ -201,8 +204,8 @@ object ActiveCutSessionStore {
             updatedAtEpochMs = root.optLong("updatedAt", marker.lastModified()),
         )
     }.getOrElse {
-        markerFile(sessionDir).delete()
-        temporaryMarkerFile(sessionDir).delete()
+        runCatching { markerFile(sessionDir).delete() }
+        runCatching { temporaryMarkerFile(sessionDir).delete() }
         null
     }
 
