@@ -37,6 +37,12 @@
             android:foregroundServiceType="mediaProcessing"
             android:stopWithTask="false" />
 
+        <service
+            android:name=".processing.AutoTrimAnalysisService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProcessing"
+            android:stopWithTask="false" />
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"

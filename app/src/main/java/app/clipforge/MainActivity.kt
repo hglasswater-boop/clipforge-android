@@ -9,7 +9,9 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
@@ -18,6 +20,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import app.clipforge.ui.AutoTrimEntryButton
 import app.clipforge.ui.AutoTrimHost
 import app.clipforge.ui.ClipForgeApp
 import app.clipforge.ui.ClipForgeDirectOutputHost
@@ -34,12 +37,24 @@ class MainActivity : ComponentActivity() {
             val dark = isSystemInDarkTheme()
             MaterialTheme(colorScheme = if (dark) darkColorScheme() else lightColorScheme()) {
                 Box(Modifier.fillMaxSize()) {
-                    Box(
+                    Column(
                         Modifier
                             .fillMaxSize()
-                            .navigationBarsPadding()
+                            .navigationBarsPadding(),
                     ) {
-                        ClipForgeApp(mainViewModel)
+                        Box(
+                            Modifier
+                                .weight(1f)
+                                .fillMaxWidth(),
+                        ) {
+                            ClipForgeApp(mainViewModel)
+                        }
+                        mainState.trimEditor?.let { editor ->
+                            AutoTrimEntryButton(
+                                editor = editor,
+                                enabled = !mainState.busy,
+                            )
+                        }
                     }
                     ClipForgeDirectOutputHost(mainViewModel)
                     AutoTrimHost(mainViewModel)
