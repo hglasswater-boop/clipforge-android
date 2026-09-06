@@ -10,13 +10,13 @@ enum class AutoTrimPhase(
     internal val endPercent: Double,
 ) {
     PREPARING("解析を準備中", 0.0, 2.0),
-    START_SCENE("先頭の映像変化を解析中", 2.0, 18.0),
-    END_SCENE("末尾の映像変化を解析中", 18.0, 34.0),
-    START_AUDIO("先頭の音声変化を解析中", 34.0, 49.0),
-    END_AUDIO("末尾の音声変化を解析中", 49.0, 64.0),
-    VISUAL_FINGERPRINT("映像fingerprintを作成中", 64.0, 94.0),
-    KNOWN_CLIP_MATCH("既知クリップと照合中", 94.0, 98.0),
-    RANKING("境界候補を評価中", 98.0, 100.0),
+    START_AUDIO("先頭の音声変化を解析中", 2.0, 17.0),
+    END_AUDIO("末尾の音声変化を解析中", 17.0, 32.0),
+    VISUAL_FINGERPRINT("映像を疎く探索中", 32.0, 62.0),
+    KNOWN_CLIP_MATCH("既知クリップと照合中", 62.0, 68.0),
+    START_SCENE("先頭候補を精密解析中", 68.0, 82.0),
+    END_SCENE("末尾候補を精密解析中", 82.0, 96.0),
+    RANKING("境界候補を評価中", 96.0, 100.0),
     COMPLETE("解析完了", 100.0, 100.0),
 }
 
@@ -31,7 +31,7 @@ data class AutoTrimProgress(
 /**
  * Converts actual per-phase work into monotonic overall progress and a smoothed ETA.
  * No timer-driven fake progress is used: phase fractions come from FFmpeg timestamps or
- * the number of visual fingerprint frames that have actually been sampled.
+ * the number of sparse visual frames that have actually been sampled.
  */
 internal class AutoTrimProgressTracker(
     private val nowMs: () -> Long = { System.nanoTime() / 1_000_000L },

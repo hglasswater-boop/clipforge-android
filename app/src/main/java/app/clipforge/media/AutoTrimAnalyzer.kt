@@ -40,6 +40,11 @@ private data class AudioFeatureResult(
     val signals: List<AutoTrimAudioSignal>,
 )
 
+private data class FrameSignature(
+    val hash: Long,
+    val averageLuma: Int,
+)
+
 class AutoTrimAnalyzer(context: Context) {
     private val appContext = context.applicationContext
     private val sceneDetector = SceneChangeDetector()
@@ -65,20 +70,8 @@ class AutoTrimAnalyzer(context: Context) {
         val endRange = MediaSegment((durationMs - resolvedEdgeWindowMs).coerceAtLeast(0L), durationMs)
         emit(AutoTrimPhase.PREPARING, 1.0)
 
-        val startScenes = detectScenes(
-            sourceUri = sourceUri,
-            localInputPath = localInputPath,
-            durationMs = durationMs,
-            range = startRange,
-            onProgress = { emit(AutoTrimPhase.START_SCENE, it) },
-        )
-        val endScenes = detectScenes(
-            sourceUri = sourceUri,
-            localInputPath = localInputPath,
-            durationMs = durationMs,
-            range = endRange,
-            onProgress = { emit(AutoTrimPhase.END_SCENE, it) },
-        )
+        // Audio is cheap at 8 kHz, so keep the complete edge-window scan for reliable silence and
+        // level-boundary evidence. Expensive video decoding is handled sparsely below.
         val startAudio = detectAudio(
             sourceUri = sourceUri,
             localInputPath = localInputPath,
@@ -94,7 +87,10 @@ class AutoTrimAnalyzer(context: Context) {
             onProgress = { emit(AutoTrimPhase.END_AUDIO, it) },
         )
 
-        val visual = sampleVisualFingerprints(
+        // Reuse these sparse sync frames both for learned fingerprints and for coarse scene hints.
+        // Do not alternate start/end seeks: sequential edge reads are substantially friendlier to
+        // SMB and Content URI providers.
+        val visual = sampleSparseVisualEdges(
             sourceUri = sourceUri,
             localInputPath = localInputPath,
             durationMs = durationMs,
@@ -104,7 +100,12 @@ class AutoTrimAnalyzer(context: Context) {
         val startFingerprint = EdgeFingerprintSnapshot(
             side = AutoTrimSide.START,
             edgeDurationMs = resolvedEdgeWindowMs,
-            visual = visual.first,
+            visual = visual.first.map { sample ->
+                VisualFingerprintPoint(
+                    offsetFromEdgeMs = sample.offsetFromEdgeMs,
+                    hash = sample.hash,
+                )
+            },
             audio = startAudio.samples.map {
                 AudioFingerprintPoint(
                     offsetFromEdgeMs = it.timeMs,
@@ -115,7 +116,12 @@ class AutoTrimAnalyzer(context: Context) {
         val endFingerprint = EdgeFingerprintSnapshot(
             side = AutoTrimSide.END,
             edgeDurationMs = resolvedEdgeWindowMs,
-            visual = visual.second,
+            visual = visual.second.map { sample ->
+                VisualFingerprintPoint(
+                    offsetFromEdgeMs = sample.offsetFromEdgeMs,
+                    hash = sample.hash,
+                )
+            },
             audio = endAudio.samples.map {
                 AudioFingerprintPoint(
                     offsetFromEdgeMs = (durationMs - it.timeMs).coerceAtLeast(0L),
@@ -131,6 +137,39 @@ class AutoTrimAnalyzer(context: Context) {
         emit(AutoTrimPhase.KNOWN_CLIP_MATCH, 0.65)
         val endKnown = bestKnownMatch(endFingerprint, known, durationMs)
         emit(AutoTrimPhase.KNOWN_CLIP_MATCH, 1.0)
+
+        // The old path decoded the complete start and end windows. Instead, sparse dHash/luma
+        // changes plus audio boundaries select at most a few short windows for precise decoding.
+        // A very strong learned-clip match can skip this stage entirely for that edge.
+        val startWindows = buildSceneRefinementWindows(
+            range = startRange,
+            visualHints = visualRefinementHints(AutoTrimSide.START, durationMs, visual.first),
+            audioSignals = startAudio.signals,
+            knownMatch = startKnown,
+        )
+        val startScenes = detectSceneWindows(
+            sourceUri = sourceUri,
+            localInputPath = localInputPath,
+            durationMs = durationMs,
+            edgeRange = startRange,
+            windows = startWindows,
+            onProgress = { emit(AutoTrimPhase.START_SCENE, it) },
+        )
+
+        val endWindows = buildSceneRefinementWindows(
+            range = endRange,
+            visualHints = visualRefinementHints(AutoTrimSide.END, durationMs, visual.second),
+            audioSignals = endAudio.signals,
+            knownMatch = endKnown,
+        )
+        val endScenes = detectSceneWindows(
+            sourceUri = sourceUri,
+            localInputPath = localInputPath,
+            durationMs = durationMs,
+            edgeRange = endRange,
+            windows = endWindows,
+            onProgress = { emit(AutoTrimPhase.END_SCENE, it) },
+        )
 
         emit(AutoTrimPhase.RANKING, 0.0)
         val startCandidates = rankAutoTrimCandidates(
@@ -215,6 +254,49 @@ class AutoTrimAnalyzer(context: Context) {
         }
         .maxByOrNull(KnownClipMatch::similarity)
 
+    private suspend fun detectSceneWindows(
+        sourceUri: String,
+        localInputPath: String?,
+        durationMs: Long,
+        edgeRange: MediaSegment,
+        windows: List<MediaSegment>,
+        onProgress: (Double) -> Unit,
+    ): SceneDetectionResult {
+        if (windows.isEmpty()) {
+            onProgress(1.0)
+            return SceneDetectionResult(emptyList(), edgeRange.startMs, edgeRange.endMs)
+        }
+
+        val totalWorkMs = windows.sumOf { (it.endMs - it.startMs).coerceAtLeast(0L) }.coerceAtLeast(1L)
+        var completedWorkMs = 0L
+        val markers = mutableListOf<SceneMarker>()
+        onProgress(0.0)
+
+        windows.forEach { window ->
+            coroutineContext.ensureActive()
+            val windowWorkMs = (window.endMs - window.startMs).coerceAtLeast(1L)
+            val result = detectScenes(
+                sourceUri = sourceUri,
+                localInputPath = localInputPath,
+                durationMs = durationMs,
+                range = window,
+                onProgress = { fraction ->
+                    val done = completedWorkMs + (windowWorkMs * fraction.coerceIn(0.0, 1.0)).roundToLong()
+                    onProgress(done.toDouble() / totalWorkMs.toDouble())
+                },
+            )
+            markers += result.markers
+            completedWorkMs += windowWorkMs
+            onProgress(completedWorkMs.toDouble() / totalWorkMs.toDouble())
+        }
+
+        return SceneDetectionResult(
+            markers = markers.sortedWith(compareBy(SceneMarker::timeMs, SceneMarker::kind)),
+            scannedStartMs = edgeRange.startMs,
+            scannedEndMs = edgeRange.endMs,
+        )
+    }
+
     private suspend fun detectScenes(
         sourceUri: String,
         localInputPath: String?,
@@ -228,15 +310,19 @@ class AutoTrimAnalyzer(context: Context) {
                 durationMs = durationMs,
                 startMs = range.startMs,
                 endMs = range.endMs,
+                mode = SceneScanMode.PRECISE,
                 onProgress = onProgress,
             )
         } else {
+            // Open a new descriptor for every precise window. Never share a file position across
+            // FFmpeg sessions, especially for SMB-backed Content URIs.
             openSeekable(sourceUri).use { descriptor ->
                 sceneDetector.detectDescriptor(
                     fd = descriptor.fd,
                     durationMs = durationMs,
                     startMs = range.startMs,
                     endMs = range.endMs,
+                    mode = SceneScanMode.PRECISE,
                     onProgress = onProgress,
                 )
             }
@@ -279,13 +365,13 @@ class AutoTrimAnalyzer(context: Context) {
         AudioFeatureResult(emptyList(), emptyList())
     }
 
-    private suspend fun sampleVisualFingerprints(
+    private suspend fun sampleSparseVisualEdges(
         sourceUri: String,
         localInputPath: String?,
         durationMs: Long,
         edgeWindowMs: Long,
         onProgress: (Double) -> Unit,
-    ): Pair<List<VisualFingerprintPoint>, List<VisualFingerprintPoint>> {
+    ): Pair<List<SparseVisualSample>, List<SparseVisualSample>> {
         val retriever = MediaMetadataRetriever()
         return try {
             if (localInputPath != null) {
@@ -304,37 +390,52 @@ class AutoTrimAnalyzer(context: Context) {
             }
             val totalFrames = (offsets.size * 2).coerceAtLeast(1)
             var completedFrames = 0
-            val start = mutableListOf<VisualFingerprintPoint>()
-            val end = mutableListOf<VisualFingerprintPoint>()
+            val start = mutableListOf<SparseVisualSample>()
+            val end = mutableListOf<SparseVisualSample>()
             onProgress(0.0)
+
+            // Keep physical access moving forward through the start of the file.
             offsets.forEach { offset ->
                 coroutineContext.ensureActive()
-                frameHash(retriever, offset)?.let { hash ->
-                    start += VisualFingerprintPoint(offsetFromEdgeMs = offset, hash = hash)
-                }
-                completedFrames += 1
-                onProgress(completedFrames.toDouble() / totalFrames.toDouble())
-
-                coroutineContext.ensureActive()
-                val endTime = (durationMs - offset).coerceAtLeast(0L)
-                frameHash(retriever, endTime)?.let { hash ->
-                    end += VisualFingerprintPoint(offsetFromEdgeMs = offset, hash = hash)
+                frameSignature(retriever, offset)?.let { signature ->
+                    start += SparseVisualSample(
+                        offsetFromEdgeMs = offset,
+                        hash = signature.hash,
+                        averageLuma = signature.averageLuma,
+                    )
                 }
                 completedFrames += 1
                 onProgress(completedFrames.toDouble() / totalFrames.toDouble())
             }
-            start to end
+
+            // Walk the end window in chronological file order. The stored offset remains measured
+            // backwards from the end so learned fingerprints keep the existing representation.
+            offsets.asReversed().forEach { offset ->
+                coroutineContext.ensureActive()
+                val endTime = (durationMs - offset).coerceAtLeast(0L)
+                frameSignature(retriever, endTime)?.let { signature ->
+                    end += SparseVisualSample(
+                        offsetFromEdgeMs = offset,
+                        hash = signature.hash,
+                        averageLuma = signature.averageLuma,
+                    )
+                }
+                completedFrames += 1
+                onProgress(completedFrames.toDouble() / totalFrames.toDouble())
+            }
+            start.sortedBy(SparseVisualSample::offsetFromEdgeMs) to
+                end.sortedBy(SparseVisualSample::offsetFromEdgeMs)
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Throwable) {
             onProgress(1.0)
-            emptyList<VisualFingerprintPoint>() to emptyList()
+            emptyList<SparseVisualSample>() to emptyList()
         } finally {
             runCatching { retriever.release() }
         }
     }
 
-    private fun frameHash(retriever: MediaMetadataRetriever, timeMs: Long): Long? {
+    private fun frameSignature(retriever: MediaMetadataRetriever, timeMs: Long): FrameSignature? {
         val bitmap = retriever.getFrameAtTime(
             timeMs.coerceAtLeast(0L) * 1_000L,
             MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
@@ -342,17 +443,30 @@ class AutoTrimAnalyzer(context: Context) {
         return try {
             val scaled = android.graphics.Bitmap.createScaledBitmap(bitmap, HASH_WIDTH, HASH_HEIGHT, true)
             try {
+                val luma = IntArray(HASH_WIDTH * HASH_HEIGHT)
+                var sum = 0L
+                var index = 0
+                for (y in 0 until HASH_HEIGHT) {
+                    for (x in 0 until HASH_WIDTH) {
+                        val value = luminance(scaled.getPixel(x, y))
+                        luma[index++] = value
+                        sum += value
+                    }
+                }
+
                 var hash = 0L
                 var bit = 0
                 for (y in 0 until HASH_HEIGHT) {
+                    val row = y * HASH_WIDTH
                     for (x in 0 until HASH_WIDTH - 1) {
-                        val left = luminance(scaled.getPixel(x, y))
-                        val right = luminance(scaled.getPixel(x + 1, y))
-                        if (left > right) hash = hash or (1L shl bit)
+                        if (luma[row + x] > luma[row + x + 1]) hash = hash or (1L shl bit)
                         bit += 1
                     }
                 }
-                hash
+                FrameSignature(
+                    hash = hash,
+                    averageLuma = (sum / luma.size.coerceAtLeast(1)).toInt(),
+                )
             } finally {
                 if (scaled !== bitmap) scaled.recycle()
             }
@@ -388,7 +502,7 @@ class AutoTrimAnalyzer(context: Context) {
 
     private companion object {
         const val MIN_EDGE_WINDOW_MS = 30_000L
-        const val MIN_VISUAL_SAMPLE_INTERVAL_MS = 5_000L
+        const val MIN_VISUAL_SAMPLE_INTERVAL_MS = 7_500L
         const val MAX_VISUAL_SAMPLES_PER_EDGE = 80L
         const val MIN_LEARNED_CLIP_MS = 15_000L
         const val MIN_LEARNED_VISUAL_POINTS = 3
