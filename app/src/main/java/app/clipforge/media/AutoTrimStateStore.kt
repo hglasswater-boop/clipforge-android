@@ -8,6 +8,7 @@ data class AutoTrimUiState(
     val sessionPath: String? = null,
     val visible: Boolean = false,
     val running: Boolean = false,
+    val progress: AutoTrimProgress? = null,
     val analysis: AutoTrimAnalysis? = null,
     val error: String? = null,
 )
@@ -20,6 +21,8 @@ object AutoTrimStateStore {
     private val persistenceExecutor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "clipforge-auto-trim-state").apply { isDaemon = true }
     }
+    private var lastDurableProgressPercent = -PROGRESS_PERSIST_STEP
+    private var lastDurableProgressPhase: AutoTrimPhase? = null
 
     @Synchronized
     fun begin(sessionPath: String) {
@@ -30,9 +33,39 @@ object AutoTrimStateStore {
                 current.sessionPath == sessionPath && current.hasPayload()
             } ?: true,
             running = true,
+            progress = AutoTrimProgress(
+                phase = AutoTrimPhase.PREPARING,
+                overallPercent = 0,
+                phasePercent = 0,
+                elapsedMs = 0L,
+                remainingMs = null,
+            ),
         )
         _state.value = next
+        lastDurableProgressPercent = 0
+        lastDurableProgressPhase = AutoTrimPhase.PREPARING
         persist(next, wait = false)
+    }
+
+    @Synchronized
+    fun updateProgress(sessionPath: String, progress: AutoTrimProgress) {
+        val current = _state.value
+        if (current.sessionPath != sessionPath || !current.running) return
+        val previous = current.progress
+        if (previous != null && progress.overallPercent < previous.overallPercent) return
+
+        val next = current.copy(progress = progress)
+        _state.value = next
+
+        val shouldPersist =
+            progress.phase != lastDurableProgressPhase ||
+                progress.overallPercent - lastDurableProgressPercent >= PROGRESS_PERSIST_STEP ||
+                progress.overallPercent >= 99
+        if (shouldPersist) {
+            lastDurableProgressPercent = progress.overallPercent
+            lastDurableProgressPhase = progress.phase
+            persist(next, wait = false)
+        }
     }
 
     @Synchronized
@@ -42,9 +75,18 @@ object AutoTrimStateStore {
             sessionPath = sessionPath,
             visible = current.visible.takeIf { current.sessionPath == sessionPath } ?: true,
             running = false,
+            progress = AutoTrimProgress(
+                phase = AutoTrimPhase.COMPLETE,
+                overallPercent = 100,
+                phasePercent = 100,
+                elapsedMs = current.progress?.elapsedMs ?: 0L,
+                remainingMs = 0L,
+            ),
             analysis = analysis,
         )
         _state.value = next
+        lastDurableProgressPercent = 100
+        lastDurableProgressPhase = AutoTrimPhase.COMPLETE
         // Completion is valuable state. Do not report success before this snapshot is durable.
         persist(next, wait = true)
     }
@@ -56,6 +98,7 @@ object AutoTrimStateStore {
             sessionPath = sessionPath,
             visible = current.visible.takeIf { current.sessionPath == sessionPath } ?: true,
             running = false,
+            progress = current.progress.takeIf { current.sessionPath == sessionPath },
             analysis = current.analysis.takeIf { current.sessionPath == sessionPath },
             error = message,
         )
@@ -70,6 +113,7 @@ object AutoTrimStateStore {
             sessionPath = sessionPath,
             visible = current.visible.takeIf { current.sessionPath == sessionPath } ?: true,
             running = false,
+            progress = current.progress.takeIf { current.sessionPath == sessionPath },
             analysis = current.analysis.takeIf { current.sessionPath == sessionPath },
             error = "自動解析をキャンセルしました",
         )
@@ -113,6 +157,8 @@ object AutoTrimStateStore {
             val current = _state.value
             if (current.sessionPath == sessionPath && current.hasPayload()) return true
             _state.value = restored
+            lastDurableProgressPercent = restored.progress?.overallPercent ?: -PROGRESS_PERSIST_STEP
+            lastDurableProgressPhase = restored.progress?.phase
         }
         return true
     }
@@ -122,13 +168,17 @@ object AutoTrimStateStore {
         // Flush pending snapshots before a test deletes its temporary session directory.
         persistenceExecutor.submit { }.get()
         _state.value = AutoTrimUiState()
+        lastDurableProgressPercent = -PROGRESS_PERSIST_STEP
+        lastDurableProgressPhase = null
     }
 
     private fun AutoTrimUiState.hasPayload(): Boolean =
-        running || analysis != null || error != null
+        running || progress != null || analysis != null || error != null
 
     private fun persist(state: AutoTrimUiState, wait: Boolean) {
         val future = persistenceExecutor.submit { AutoTrimStatePersistence.save(state) }
         if (wait) future.get()
     }
+
+    private const val PROGRESS_PERSIST_STEP = 5
 }
