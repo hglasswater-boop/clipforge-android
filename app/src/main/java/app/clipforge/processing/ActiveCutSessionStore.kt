@@ -88,6 +88,7 @@ object ActiveCutSessionStore {
     /**
      * Restores the newest valid marker. Call before ExternalEditPipeline is constructed so the
      * active directory can be touched and excluded from its 24-hour stale-session cleanup.
+     * Only a bounded number of marker-bearing directories is parsed because this runs at launch.
      */
     fun restore(cacheRoot: File): ActiveCutSessionSnapshot? {
         val root = File(cacheRoot, EDIT_SESSION_RELATIVE_PATH)
@@ -96,6 +97,9 @@ object ActiveCutSessionStore {
             root.listFiles().orEmpty()
                 .asSequence()
                 .filter(File::isDirectory)
+                .filter { session -> markerFile(session).isFile }
+                .sortedByDescending { session -> markerFile(session).lastModified() }
+                .take(MAX_STARTUP_SESSION_SCAN)
                 .mapNotNull(::read)
                 .maxByOrNull(ActiveCutSessionSnapshot::updatedAtEpochMs)
         }.getOrNull()
@@ -252,4 +256,5 @@ object ActiveCutSessionStore {
     private const val EDIT_SESSION_RELATIVE_PATH = "clipforge/external-edit"
     private const val MAX_THUMBNAILS = 64
     private const val MAX_STRING_BYTES = 1024 * 1024
+    private const val MAX_STARTUP_SESSION_SCAN = 64
 }
