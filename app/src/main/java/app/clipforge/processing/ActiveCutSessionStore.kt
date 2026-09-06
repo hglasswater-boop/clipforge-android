@@ -2,9 +2,12 @@ package app.clipforge.processing
 
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import org.json.JSONArray
-import org.json.JSONObject
+import java.io.BufferedInputStream
+import java.io.BufferedOutputStream
+import java.io.DataInputStream
+import java.io.DataOutputStream
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
@@ -56,7 +59,7 @@ object ActiveCutSessionStore {
             sessionPath = sessionPath,
             localPath = localPath,
             durationMs = durationMs,
-            thumbnailPaths = thumbnailPaths,
+            thumbnailPaths = thumbnailPaths.take(MAX_THUMBNAILS),
             phase = ActiveCutSessionPhase.EDITING,
             updatedAtEpochMs = System.currentTimeMillis(),
         )
@@ -130,27 +133,23 @@ object ActiveCutSessionStore {
         require(sessionDir.isDirectory) { "Edit session directory does not exist" }
         val target = markerFile(sessionDir)
         val temporary = temporaryMarkerFile(sessionDir)
-        val json = JSONObject()
-            .put("version", VERSION)
-            .put("sourceUri", snapshot.sourceUri)
-            .put("sourceName", snapshot.sourceName)
-            .put("sessionPath", snapshot.sessionPath)
-            .put("localPath", snapshot.localPath ?: JSONObject.NULL)
-            .put("durationMs", snapshot.durationMs)
-            .put("phase", snapshot.phase.name)
-            .put("updatedAt", snapshot.updatedAtEpochMs)
-            .put(
-                "thumbnailPaths",
-                JSONArray().apply {
-                    snapshot.thumbnailPaths.forEach { path -> put(path) }
-                },
-            )
-            .toString()
 
-        FileOutputStream(temporary).use { output ->
-            output.write(json.toByteArray(Charsets.UTF_8))
-            output.flush()
-            output.fd.sync()
+        FileOutputStream(temporary).use { fileOutput ->
+            DataOutputStream(BufferedOutputStream(fileOutput)).use { output ->
+                output.writeInt(MAGIC)
+                output.writeInt(VERSION)
+                writeString(output, snapshot.sourceUri)
+                writeString(output, snapshot.sourceName)
+                writeString(output, snapshot.sessionPath)
+                writeNullableString(output, snapshot.localPath)
+                output.writeLong(snapshot.durationMs)
+                output.writeInt(snapshot.phase.ordinal)
+                output.writeLong(snapshot.updatedAtEpochMs)
+                output.writeInt(snapshot.thumbnailPaths.size)
+                snapshot.thumbnailPaths.forEach { path -> writeString(output, path) }
+                output.flush()
+                fileOutput.fd.sync()
+            }
         }
         runCatching {
             Files.move(
@@ -172,42 +171,72 @@ object ActiveCutSessionStore {
     private fun read(sessionDir: File): ActiveCutSessionSnapshot? = runCatching {
         val marker = markerFile(sessionDir)
         if (!marker.isFile) return@runCatching null
-        val root = JSONObject(marker.readText())
-        require(root.optInt("version", -1) == VERSION)
-        val recordedSession = File(root.getString("sessionPath"))
-        require(recordedSession.canonicalFile == sessionDir.canonicalFile)
-        val durationMs = root.getLong("durationMs")
-        require(durationMs > 0L)
-        val localPath = root.optString("localPath")
-            .takeIf { it.isNotBlank() && it != "null" }
-            ?.let(::File)
-        if (localPath != null) {
-            require(localPath.isFile)
-            require(isInside(localPath, sessionDir))
-        }
-        val thumbnails = buildList {
-            val array = root.optJSONArray("thumbnailPaths") ?: JSONArray()
-            for (index in 0 until array.length()) {
-                val path = array.optString(index).takeIf { it.isNotBlank() } ?: continue
-                val file = File(path)
-                if (file.isFile && isInside(file, sessionDir)) add(file.absolutePath)
+        DataInputStream(BufferedInputStream(FileInputStream(marker))).use { input ->
+            require(input.readInt() == MAGIC)
+            require(input.readInt() == VERSION)
+            val sourceUri = readString(input)
+            val sourceName = readString(input)
+            val recordedSession = File(readString(input))
+            require(recordedSession.canonicalFile == sessionDir.canonicalFile)
+            val localPath = readNullableString(input)?.let(::File)
+            val durationMs = input.readLong()
+            require(durationMs > 0L)
+            val phaseOrdinal = input.readInt()
+            val phase = ActiveCutSessionPhase.entries.getOrNull(phaseOrdinal)
+                ?: error("Invalid active-session phase")
+            val updatedAt = input.readLong()
+            val thumbnailCount = input.readInt()
+            require(thumbnailCount in 0..MAX_THUMBNAILS)
+
+            if (localPath != null) {
+                require(localPath.isFile)
+                require(isInside(localPath, sessionDir))
             }
+            val thumbnails = buildList {
+                repeat(thumbnailCount) {
+                    val file = File(readString(input))
+                    if (file.isFile && isInside(file, sessionDir)) add(file.absolutePath)
+                }
+            }
+            ActiveCutSessionSnapshot(
+                sourceUri = sourceUri,
+                sourceName = sourceName,
+                sessionPath = sessionDir.absolutePath,
+                localPath = localPath?.absolutePath,
+                durationMs = durationMs,
+                thumbnailPaths = thumbnails,
+                phase = phase,
+                updatedAtEpochMs = updatedAt.takeIf { it > 0L } ?: marker.lastModified(),
+            )
         }
-        ActiveCutSessionSnapshot(
-            sourceUri = root.getString("sourceUri"),
-            sourceName = root.getString("sourceName"),
-            sessionPath = sessionDir.absolutePath,
-            localPath = localPath?.absolutePath,
-            durationMs = durationMs,
-            thumbnailPaths = thumbnails,
-            phase = ActiveCutSessionPhase.valueOf(root.getString("phase")),
-            updatedAtEpochMs = root.optLong("updatedAt", marker.lastModified()),
-        )
     }.getOrElse {
         runCatching { markerFile(sessionDir).delete() }
         runCatching { temporaryMarkerFile(sessionDir).delete() }
         null
     }
+
+    private fun writeString(output: DataOutputStream, value: String) {
+        val bytes = value.toByteArray(Charsets.UTF_8)
+        require(bytes.size <= MAX_STRING_BYTES)
+        output.writeInt(bytes.size)
+        output.write(bytes)
+    }
+
+    private fun readString(input: DataInputStream): String {
+        val size = input.readInt()
+        require(size in 0..MAX_STRING_BYTES)
+        val bytes = ByteArray(size)
+        input.readFully(bytes)
+        return bytes.toString(Charsets.UTF_8)
+    }
+
+    private fun writeNullableString(output: DataOutputStream, value: String?) {
+        output.writeBoolean(value != null)
+        if (value != null) writeString(output, value)
+    }
+
+    private fun readNullableString(input: DataInputStream): String? =
+        if (input.readBoolean()) readString(input) else null
 
     private fun isInside(file: File, directory: File): Boolean {
         val directoryPath = directory.canonicalFile.toPath()
@@ -217,7 +246,10 @@ object ActiveCutSessionStore {
     private fun markerFile(sessionDir: File): File = File(sessionDir, MARKER_FILE_NAME)
     private fun temporaryMarkerFile(sessionDir: File): File = File(sessionDir, "$MARKER_FILE_NAME.tmp")
 
+    private const val MAGIC = 0x43464553 // CFES
     private const val VERSION = 1
-    private const val MARKER_FILE_NAME = ".active-cut-session-v1.json"
+    private const val MARKER_FILE_NAME = ".active-cut-session-v1.bin"
     private const val EDIT_SESSION_RELATIVE_PATH = "clipforge/external-edit"
+    private const val MAX_THUMBNAILS = 64
+    private const val MAX_STRING_BYTES = 1024 * 1024
 }
