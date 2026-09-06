@@ -5,6 +5,10 @@ import kotlin.math.roundToLong
 /**
  * Estimates remaining time only for write phases whose message contains their own 0..100 progress.
  * Stage-level percentages are intentionally ignored because smart-cut phases have different costs.
+ *
+ * The estimate is stored as a monotonic completion deadline rather than a fixed remaining-duration
+ * snapshot. FFmpeg can report the same integer percentage for several statistics callbacks, and the
+ * displayed countdown still needs to advance during that time.
  */
 internal class WriteProgressEta(
     private val nowMs: () -> Long = { System.nanoTime() / 1_000_000L },
@@ -13,7 +17,7 @@ internal class WriteProgressEta(
 
     private val samples = ArrayDeque<Sample>()
     private var activePhase: String? = null
-    private var smoothedEtaMs: Double? = null
+    private var smoothedFinishAtMs: Double? = null
 
     @Synchronized
     fun decorate(message: String): String {
@@ -59,30 +63,39 @@ internal class WriteProgressEta(
         while (samples.size > 2 && now - samples.first().timeMs > WINDOW_MS) {
             samples.removeFirst()
         }
-        if (samples.size < 2) return smoothedEtaMs?.roundToLong()
+        if (samples.size < 2) return remainingFromDeadline(now)
 
         val first = samples.first()
         val newest = samples.last()
         val elapsedMs = newest.timeMs - first.timeMs
         val progressed = newest.percent - first.percent
         if (elapsedMs < MIN_SAMPLE_MS || progressed < MIN_PROGRESS_POINTS) {
-            return smoothedEtaMs?.roundToLong()
+            return remainingFromDeadline(now)
         }
 
         val pointsPerMs = progressed.toDouble() / elapsedMs.toDouble()
-        if (!pointsPerMs.isFinite() || pointsPerMs <= 0.0) return smoothedEtaMs?.roundToLong()
+        if (!pointsPerMs.isFinite() || pointsPerMs <= 0.0) return remainingFromDeadline(now)
         val rawEtaMs = (100 - newest.percent).toDouble() / pointsPerMs
-        if (!rawEtaMs.isFinite() || rawEtaMs <= 0.0 || rawEtaMs > MAX_ETA_MS) return null
+        if (!rawEtaMs.isFinite() || rawEtaMs <= 0.0 || rawEtaMs > MAX_ETA_MS) {
+            return remainingFromDeadline(now)
+        }
 
-        smoothedEtaMs = smoothedEtaMs
-            ?.let { previous -> previous * 0.65 + rawEtaMs * 0.35 }
-            ?: rawEtaMs
-        return smoothedEtaMs?.roundToLong()
+        val rawFinishAtMs = newest.timeMs.toDouble() + rawEtaMs
+        smoothedFinishAtMs = smoothedFinishAtMs
+            ?.let { previous -> previous * 0.65 + rawFinishAtMs * 0.35 }
+            ?: rawFinishAtMs
+        return remainingFromDeadline(now)
+    }
+
+    private fun remainingFromDeadline(now: Long): Long? {
+        val remaining = smoothedFinishAtMs?.minus(now.toDouble()) ?: return null
+        if (!remaining.isFinite() || remaining <= 0.0) return null
+        return remaining.roundToLong().coerceAtLeast(1L)
     }
 
     private fun resetSamples() {
         samples.clear()
-        smoothedEtaMs = null
+        smoothedFinishAtMs = null
     }
 
     private fun phaseOf(message: String): String? = when {
@@ -108,7 +121,7 @@ internal fun formatRemainingTime(milliseconds: Long): String {
     val minutes = seconds / 60L
     val remainingSeconds = seconds % 60L
     if (minutes < 60L) {
-        return if (remainingSeconds >= 10L) {
+        return if (remainingSeconds > 0L) {
             "約${minutes}分${remainingSeconds}秒"
         } else {
             "約${minutes}分"
