@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
@@ -210,6 +211,14 @@ class ClipForgeProcessingService : Service() {
         val uriString = request.getStringExtra(EXTRA_OUTPUT_URI) ?: return
         updateProgress(title, "バックグラウンド処理を再開しています")
         val uri = Uri.parse(uriString)
+
+        if (isXFilesRemoteOutput(uri)) {
+            val values = ContentValues().apply { put(REMOTE_TRUNCATE_KEY, true) }
+            val updated = contentResolver.update(uri, values, null, null)
+            if (updated != 1) throw IOException("SMB保存先を再開用に初期化できません")
+            return
+        }
+
         val descriptor = contentResolver.openFileDescriptor(uri, "rw")
             ?: throw IOException("再開用の保存先を開けません")
         descriptor.use {
@@ -221,6 +230,9 @@ class ClipForgeProcessingService : Service() {
             }
         }
     }
+
+    private fun isXFilesRemoteOutput(uri: Uri): Boolean =
+        uri.authority == XFILES_REMOTE_PROVIDER_AUTHORITY && uri.getQueryParameter("mode") == "output"
 
     override fun onTimeout(startId: Int, fgsType: Int) {
         val message = "バックグラウンド動画処理の上限時間に達したため停止しました"
@@ -406,6 +418,8 @@ class ClipForgeProcessingService : Service() {
         private const val EXTRA_CUT_STARTS = "cutStarts"
         private const val EXTRA_CUT_ENDS = "cutEnds"
         private const val EXTRA_CUT_MODE = "cutMode"
+        private const val XFILES_REMOTE_PROVIDER_AUTHORITY = "app.local1st.files.remotefileprovider"
+        private const val REMOTE_TRUNCATE_KEY = "truncate"
 
         fun startPrepareCut(context: Context, source: PickedVideo) {
             val intent = Intent(context, ClipForgeProcessingService::class.java)
