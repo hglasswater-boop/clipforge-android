@@ -63,15 +63,12 @@ class AutoTrimHeuristicsTest {
             windowStartMs = 300_000L,
             windowEndMs = 600_000L,
             sceneMarkers = listOf(
-                // Actual main-feature -> appended-clip transition.
                 SceneMarker(360_000L, SceneMarkerKind.SCENE_CHANGE),
-                // A visually stronger cut inside the appended clip.
                 SceneMarker(450_000L, SceneMarkerKind.SCENE_CHANGE),
                 SceneMarker(450_150L, SceneMarkerKind.BLACK),
             ),
             audioSignals = listOf(
                 AutoTrimAudioSignal(360_200L, AutoTrimAudioSignalKind.LEVEL_JUMP),
-                // Activity rises and remains busy after the true boundary.
                 AutoTrimAudioSignal(370_000L, AutoTrimAudioSignalKind.LEVEL_JUMP),
                 AutoTrimAudioSignal(380_000L, AutoTrimAudioSignalKind.LEVEL_JUMP),
                 AutoTrimAudioSignal(390_000L, AutoTrimAudioSignalKind.SILENCE_START),
@@ -107,6 +104,52 @@ class AutoTrimHeuristicsTest {
         )
 
         assertTrue(abs(candidates.first().boundaryMs - 500_000L) <= 1_000L)
+    }
+
+    @Test
+    fun `quiet appended clip hard boundary outranks opposite activity direction`() {
+        // Regression profile captured from a real tail sample where the desired boundary is about
+        // 04:50.6. The main feature is much more active than the appended clip, so the old END
+        // direction assumption produced transitionStrength=-1 and incorrectly demoted the cut.
+        val candidates = rankAutoTrimCandidates(
+            side = AutoTrimSide.END,
+            durationMs = 370_573L,
+            windowStartMs = 70_573L,
+            windowEndMs = 370_573L,
+            sceneMarkers = listOf(
+                SceneMarker(171_573L, SceneMarkerKind.SCENE_CHANGE),
+                SceneMarker(284_153L, SceneMarkerKind.BLACK),
+                SceneMarker(290_526L, SceneMarkerKind.BLACK),
+                SceneMarker(290_526L, SceneMarkerKind.SCENE_CHANGE),
+            ),
+            audioSignals = listOf(
+                AutoTrimAudioSignal(171_573L, AutoTrimAudioSignalKind.LEVEL_JUMP),
+                AutoTrimAudioSignal(181_573L, AutoTrimAudioSignalKind.LEVEL_JUMP),
+                AutoTrimAudioSignal(188_573L, AutoTrimAudioSignalKind.SILENCE_START),
+                AutoTrimAudioSignal(190_573L, AutoTrimAudioSignalKind.SILENCE_END),
+                AutoTrimAudioSignal(250_573L, AutoTrimAudioSignalKind.LEVEL_JUMP),
+                AutoTrimAudioSignal(258_163L, AutoTrimAudioSignalKind.SILENCE_END),
+                AutoTrimAudioSignal(258_173L, AutoTrimAudioSignalKind.SILENCE_START),
+                AutoTrimAudioSignal(260_083L, AutoTrimAudioSignalKind.SILENCE_END),
+                AutoTrimAudioSignal(260_134L, AutoTrimAudioSignalKind.SILENCE_START),
+                AutoTrimAudioSignal(262_573L, AutoTrimAudioSignalKind.LEVEL_JUMP),
+                AutoTrimAudioSignal(263_573L, AutoTrimAudioSignalKind.LEVEL_JUMP),
+                AutoTrimAudioSignal(284_950L, AutoTrimAudioSignalKind.SILENCE_START),
+                AutoTrimAudioSignal(285_573L, AutoTrimAudioSignalKind.LEVEL_JUMP),
+                AutoTrimAudioSignal(286_573L, AutoTrimAudioSignalKind.LEVEL_JUMP),
+                AutoTrimAudioSignal(287_573L, AutoTrimAudioSignalKind.LEVEL_JUMP),
+                AutoTrimAudioSignal(290_573L, AutoTrimAudioSignalKind.LEVEL_JUMP),
+                AutoTrimAudioSignal(290_638L, AutoTrimAudioSignalKind.SILENCE_END),
+                AutoTrimAudioSignal(362_573L, AutoTrimAudioSignalKind.LEVEL_JUMP),
+            ),
+        )
+
+        val best = candidates.first()
+        assertTrue(abs(best.boundaryMs - 290_573L) <= 1_000L)
+        assertTrue(AutoTrimEvidence.SCENE_CHANGE in best.evidence)
+        assertTrue(AutoTrimEvidence.BLACK_FRAME in best.evidence)
+        assertTrue(AutoTrimEvidence.AUDIO_CHANGE in best.evidence)
+        assertTrue(AutoTrimEvidence.SILENCE_BOUNDARY in best.evidence)
     }
 
     @Test
