@@ -24,6 +24,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -107,6 +110,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         mediaEngine = FfmpegMediaEngine(),
     )
     private val navigator = CutSessionNavigator(application)
+    private val cutDraftStore = CutDraftStore(application)
     private val _uiState = MutableStateFlow(MainUiState())
     val uiState = _uiState.asStateFlow()
     private var thumbnailJob: Job? = null
@@ -129,15 +133,37 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         )
                     }
                     is ProcessingState.CutPrepared -> {
+                        val knownSourceSize = _uiState.value.selectedVideos
+                            .firstOrNull { it.uri == processing.sourceUri }
+                            ?.sizeBytes
+                        val savedDraft = withContext(Dispatchers.IO) {
+                            cutDraftStore.load(
+                                sourceUri = processing.sourceUri,
+                                sourceName = processing.sourceName,
+                                sourceSizeBytes = knownSourceSize,
+                                durationMs = processing.durationMs,
+                            )
+                        }
                         resetEditHistory()
                         _uiState.update { state ->
                             val preparedSource = PickedVideo(
                                 uri = processing.sourceUri,
                                 displayName = processing.sourceName,
-                                sizeBytes = state.selectedVideos
-                                    .firstOrNull { it.uri == processing.sourceUri }
-                                    ?.sizeBytes,
+                                sizeBytes = knownSourceSize,
                             )
+                            val freshEditor = TrimEditorState(
+                                sourceUri = processing.sourceUri,
+                                sourceName = processing.sourceName,
+                                sessionPath = processing.sessionPath,
+                                localPath = processing.localPath,
+                                durationMs = processing.durationMs,
+                                startMs = 0L,
+                                endMs = processing.durationMs,
+                                thumbnailPaths = processing.thumbnailPaths,
+                                cutRanges = emptyList(),
+                                cutMode = CutMode.SMART,
+                            )
+                            val restoredEditor = savedDraft?.restoreInto(freshEditor) ?: freshEditor
                             state.copy(
                                 busy = false,
                                 progressPercent = null,
@@ -147,20 +173,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 sceneMarkers = emptyList(),
                                 sceneScannedRanges = emptyList(),
                                 selectedVideos = state.selectedVideos.ifEmpty { listOf(preparedSource) },
-                                trimEditor = TrimEditorState(
-                                    sourceUri = processing.sourceUri,
-                                    sourceName = processing.sourceName,
-                                    sessionPath = processing.sessionPath,
-                                    localPath = processing.localPath,
-                                    durationMs = processing.durationMs,
-                                    startMs = 0L,
-                                    endMs = processing.durationMs,
-                                    thumbnailPaths = processing.thumbnailPaths,
-                                    cutRanges = emptyList(),
-                                    cutMode = CutMode.SMART,
-                                ),
+                                trimEditor = restoredEditor,
                                 pendingDestination = null,
-                                status = "削除したい範囲を選んで追加してください",
+                                status = if (savedDraft != null && restoredEditor.cutRanges.isNotEmpty()) {
+                                    "前回の削除範囲を自動復元しました（${restoredEditor.cutRanges.size}箇所）"
+                                } else {
+                                    "削除したい範囲を選んで追加してください。切断点は自動保存されます"
+                                },
                                 error = null,
                             )
                         }
@@ -216,6 +235,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
             }
+        }
+
+        viewModelScope.launch {
+            _uiState
+                .map { state ->
+                    state.trimEditor?.let { editor ->
+                        cutDraftFrom(
+                            editor = editor,
+                            sourceSizeBytes = state.selectedVideos
+                                .firstOrNull { it.uri == editor.sourceUri }
+                                ?.sizeBytes,
+                        )
+                    }
+                }
+                .filterNotNull()
+                .distinctUntilChanged()
+                .collect { draft ->
+                    withContext(Dispatchers.IO) { cutDraftStore.save(draft) }
+                }
         }
     }
 
@@ -1003,7 +1041,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 sceneSearchBusy = false,
                 sceneMarkers = emptyList(),
                 sceneScannedRanges = emptyList(),
-                status = "編集をキャンセルしました",
+                status = "編集画面を閉じました。切断点は自動保存されています",
                 error = null,
             )
         }
