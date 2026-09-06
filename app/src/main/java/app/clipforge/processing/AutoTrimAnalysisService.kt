@@ -15,7 +15,9 @@ import app.clipforge.MainActivity
 import app.clipforge.media.AutoTrimAnalyzer
 import app.clipforge.media.AutoTrimPhase
 import app.clipforge.media.AutoTrimProgress
+import app.clipforge.media.AutoTrimRangeSettings
 import app.clipforge.media.AutoTrimStateStore
+import app.clipforge.media.normalizeAutoTrimEdgeWindowMs
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -54,6 +56,9 @@ class AutoTrimAnalysisService : Service() {
         val sessionPath = requireNotNull(request.getStringExtra(EXTRA_SESSION_PATH))
         val localInputPath = request.getStringExtra(EXTRA_LOCAL_INPUT)
         val durationMs = request.getLongExtra(EXTRA_DURATION_MS, -1L)
+        val edgeWindowMs = normalizeAutoTrimEdgeWindowMs(
+            request.getLongExtra(EXTRA_EDGE_WINDOW_MS, AutoTrimRangeSettings.DEFAULT_EDGE_WINDOW_MS),
+        )
         require(durationMs > 0L) { "動画の長さが不正です" }
 
         cancellationRequested = false
@@ -64,7 +69,7 @@ class AutoTrimAnalysisService : Service() {
         startAnalysisForeground(
             buildNotification(
                 title = "前後を自動解析中",
-                message = "0% ・ 解析を準備中",
+                message = "0% ・ 解析を準備中（前後${edgeWindowMs / 60_000L}分）",
                 ongoing = true,
                 progressPercent = 0,
             ),
@@ -77,6 +82,7 @@ class AutoTrimAnalysisService : Service() {
                     sourceUri = sourceUri,
                     localInputPath = localInputPath,
                     durationMs = durationMs,
+                    edgeWindowMs = edgeWindowMs,
                     onProgress = { progress ->
                         AutoTrimStateStore.updateProgress(sessionPath, progress)
                         updateProgressNotification(progress)
@@ -271,6 +277,7 @@ class AutoTrimAnalysisService : Service() {
         private const val EXTRA_SESSION_PATH = "sessionPath"
         private const val EXTRA_LOCAL_INPUT = "localInput"
         private const val EXTRA_DURATION_MS = "durationMs"
+        private const val EXTRA_EDGE_WINDOW_MS = "edgeWindowMs"
 
         fun start(
             context: Context,
@@ -278,12 +285,14 @@ class AutoTrimAnalysisService : Service() {
             sessionPath: String,
             localInputPath: String?,
             durationMs: Long,
+            edgeWindowMs: Long = AutoTrimRangeSettings.DEFAULT_EDGE_WINDOW_MS,
         ) {
             val intent = Intent(context, AutoTrimAnalysisService::class.java)
                 .setAction(ACTION_ANALYZE)
                 .putExtra(EXTRA_SOURCE_URI, sourceUri)
                 .putExtra(EXTRA_SESSION_PATH, sessionPath)
                 .putExtra(EXTRA_DURATION_MS, durationMs)
+                .putExtra(EXTRA_EDGE_WINDOW_MS, normalizeAutoTrimEdgeWindowMs(edgeWindowMs))
             localInputPath?.let { intent.putExtra(EXTRA_LOCAL_INPUT, it) }
             context.startForegroundService(intent)
         }
