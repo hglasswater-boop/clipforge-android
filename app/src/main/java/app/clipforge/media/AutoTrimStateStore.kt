@@ -23,9 +23,12 @@ object AutoTrimStateStore {
 
     @Synchronized
     fun begin(sessionPath: String) {
+        val current = _state.value
         val next = AutoTrimUiState(
             sessionPath = sessionPath,
-            visible = true,
+            visible = current.visible.takeIf {
+                current.sessionPath == sessionPath && current.hasPayload()
+            } ?: true,
             running = true,
         )
         _state.value = next
@@ -116,6 +119,8 @@ object AutoTrimStateStore {
 
     @Synchronized
     internal fun resetForTest() {
+        // Flush pending snapshots before a test deletes its temporary session directory.
+        persistenceExecutor.submit { }.get()
         _state.value = AutoTrimUiState()
     }
 
