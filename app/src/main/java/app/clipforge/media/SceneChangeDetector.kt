@@ -102,9 +102,12 @@ internal fun sceneVideoFilter(mode: SceneScanMode): String {
 /**
  * Precise scene analysis drops almost every frame with select(). FFmpegKit statistics are based
  * on output timestamps, so a quiet window with no scene changes can otherwise look frozen at 0%
- * even while decoding is still making progress. Keep a tiny 1 fps progress branch in parallel
- * with the scene-change branch. It reuses the already scaled frames and is written only to the
- * null muxer, so it does not change the analysis result or create a media file.
+ * even while decoding is still making progress.
+ *
+ * Keep a tiny 1 fps progress branch as the only muxed output. The scene-change branch ends in
+ * nullsink after showinfo, so it still emits scene logs but cannot pin the output timestamp at 0
+ * when there are no scene changes. Both branches reuse the already scaled frames and no media
+ * file is created.
  *
  * Use 0:V:0 rather than 0:v:0 so attached pictures / cover art are never selected as the movie.
  */
@@ -114,7 +117,7 @@ internal fun preciseSceneFilterGraph(): String {
         "blackdetect=d=${spec.blackDurationSeconds}:pic_th=0.98:pix_th=0.10," +
         "split=2[progress_src][scene_src];" +
         "[progress_src]fps=1[progress];" +
-        "[scene_src]select='gt(scene,${spec.sceneThreshold})',showinfo[changes]"
+        "[scene_src]select='gt(scene,${spec.sceneThreshold})',showinfo,nullsink"
 }
 
 class SceneChangeDetector {
@@ -192,7 +195,6 @@ class SceneChangeDetector {
             arguments += listOf(
                 "-filter_complex", preciseSceneFilterGraph(),
                 "-map", "[progress]",
-                "-map", "[changes]",
             )
         } else {
             arguments += listOf(
