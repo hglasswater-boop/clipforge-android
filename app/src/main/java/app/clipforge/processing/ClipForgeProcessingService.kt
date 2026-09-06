@@ -37,6 +37,7 @@ class ClipForgeProcessingService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     @Volatile private var cancellationRequested = false
     @Volatile private var timeoutFailure: String? = null
+    @Volatile private var activeCutSessionPath: String? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -49,6 +50,7 @@ class ClipForgeProcessingService : Service() {
         if (request.action == ACTION_CANCEL) {
             val activeJob = processingJob?.takeIf { !it.isCompleted }
             if (activeJob == null) {
+                activeCutSessionPath?.let(ActiveCutSessionStore::markEditing)
                 finishCancelled("処理をキャンセルしました")
                 stopSelf(startId)
                 return START_NOT_STICKY
@@ -65,12 +67,18 @@ class ClipForgeProcessingService : Service() {
         cancellationRequested = false
         timeoutFailure = null
         val redelivered = flags and START_FLAG_REDELIVERY != 0
+        val cutSessionPath = request.getStringExtra(EXTRA_SESSION_PATH)
+            .takeIf { request.action == ACTION_CUT }
+        activeCutSessionPath = cutSessionPath
 
         val title = when (request.action) {
             ACTION_PREPARE_CUT -> "カット編集を準備中"
             ACTION_CONCAT -> "動画を結合中"
             ACTION_CUT -> "編集結果を保存中"
-            else -> return START_NOT_STICKY
+            else -> {
+                activeCutSessionPath = null
+                return START_NOT_STICKY
+            }
         }
         val initialPercent = if (request.action == ACTION_CUT) 0 else null
         updateProgress(title, "処理を準備しています", initialPercent)
@@ -91,12 +99,17 @@ class ClipForgeProcessingService : Service() {
                 context = applicationContext,
                 mediaEngine = mediaEngine,
             )
+            var cutSucceeded = false
             try {
+                cutSessionPath?.let(ActiveCutSessionStore::markExporting)
                 if (redelivered) resetOutputForRedelivery(request, title)
                 when (request.action) {
                     ACTION_PREPARE_CUT -> prepareCut(request, title, pipeline)
                     ACTION_CONCAT -> concat(request, title, pipeline)
-                    ACTION_CUT -> cut(request, title, multiCutExporter)
+                    ACTION_CUT -> {
+                        cut(request, title, multiCutExporter)
+                        cutSucceeded = true
+                    }
                 }
             } catch (error: Throwable) {
                 val timeoutMessage = timeoutFailure
@@ -111,10 +124,18 @@ class ClipForgeProcessingService : Service() {
                     }
                 }
             } finally {
+                cutSessionPath?.let { sessionPath ->
+                    if (cutSucceeded) {
+                        ActiveCutSessionStore.clear(sessionPath)
+                    } else {
+                        ActiveCutSessionStore.markEditing(sessionPath)
+                    }
+                }
                 releaseOutputGrant(request.getStringExtra(EXTRA_OUTPUT_URI))
                 releaseWakeLock()
                 cancellationRequested = false
                 timeoutFailure = null
+                activeCutSessionPath = null
                 processingJob = null
                 stopSelf()
             }
