@@ -28,6 +28,12 @@ enum class SceneScanMode {
     PRECISE,
 }
 
+private data class SceneFilterSpec(
+    val scaleWidth: Int,
+    val blackDurationSeconds: String,
+    val sceneThreshold: String,
+)
+
 private val showInfoPtsRegex = Regex("""pts_time:([0-9]+(?:\.[0-9]+)?)""")
 private val blackStartRegex = Regex("""black_start:([0-9]+(?:\.[0-9]+)?)""")
 
@@ -73,15 +79,45 @@ internal fun resolvedSceneScanMode(
     else -> requested
 }
 
-internal fun sceneVideoFilter(mode: SceneScanMode): String = when (mode) {
-    SceneScanMode.COARSE ->
-        "scale=240:-2:flags=fast_bilinear,setpts=PTS-STARTPTS," +
-            "blackdetect=d=0.40:pic_th=0.98:pix_th=0.10," +
-            "select=gt(scene\\,0.40),showinfo"
-    SceneScanMode.PRECISE, SceneScanMode.AUTO ->
-        "scale=320:-2:flags=fast_bilinear,setpts=PTS-STARTPTS," +
-            "blackdetect=d=0.08:pic_th=0.98:pix_th=0.10," +
-            "select=gt(scene\\,0.35),showinfo"
+private fun sceneFilterSpec(mode: SceneScanMode): SceneFilterSpec = when (mode) {
+    SceneScanMode.COARSE -> SceneFilterSpec(
+        scaleWidth = 240,
+        blackDurationSeconds = "0.40",
+        sceneThreshold = "0.40",
+    )
+    SceneScanMode.PRECISE, SceneScanMode.AUTO -> SceneFilterSpec(
+        scaleWidth = 320,
+        blackDurationSeconds = "0.08",
+        sceneThreshold = "0.35",
+    )
+}
+
+internal fun sceneVideoFilter(mode: SceneScanMode): String {
+    val spec = sceneFilterSpec(mode)
+    return "scale=${spec.scaleWidth}:-2:flags=fast_bilinear,setpts=PTS-STARTPTS," +
+        "blackdetect=d=${spec.blackDurationSeconds}:pic_th=0.98:pix_th=0.10," +
+        "select='gt(scene,${spec.sceneThreshold})',showinfo"
+}
+
+/**
+ * Precise scene analysis drops almost every frame with select(). FFmpegKit statistics are based
+ * on output timestamps, so a quiet window with no scene changes can otherwise look frozen at 0%
+ * even while decoding is still making progress.
+ *
+ * Keep a tiny 1 fps progress branch as the only muxed output. The scene-change branch ends in
+ * nullsink after showinfo, so it still emits scene logs but cannot pin the output timestamp at 0
+ * when there are no scene changes. Both branches reuse the already scaled frames and no media
+ * file is created.
+ *
+ * Use 0:V:0 rather than 0:v:0 so attached pictures / cover art are never selected as the movie.
+ */
+internal fun preciseSceneFilterGraph(): String {
+    val spec = sceneFilterSpec(SceneScanMode.PRECISE)
+    return "[0:V:0]scale=${spec.scaleWidth}:-2:flags=fast_bilinear,setpts=PTS-STARTPTS," +
+        "blackdetect=d=${spec.blackDurationSeconds}:pic_th=0.98:pix_th=0.10," +
+        "split=2[progress_src][scene_src];" +
+        "[progress_src]fps=1[progress];" +
+        "[scene_src]select='gt(scene,${spec.sceneThreshold})',showinfo,nullsink"
 }
 
 class SceneChangeDetector {
@@ -154,11 +190,20 @@ class SceneChangeDetector {
             "-nostats",
         )
         arguments += inputArguments
+        arguments += listOf("-t", seconds(safeEnd - safeStart))
+        if (mode == SceneScanMode.PRECISE) {
+            arguments += listOf(
+                "-filter_complex", preciseSceneFilterGraph(),
+                "-map", "[progress]",
+            )
+        } else {
+            arguments += listOf(
+                "-map", "0:V:0",
+                "-vf", sceneVideoFilter(mode),
+            )
+        }
         arguments += listOf(
-            "-t", seconds(safeEnd - safeStart),
-            "-map", "0:V:0",
             "-an", "-sn", "-dn",
-            "-vf", sceneVideoFilter(mode),
             "-f", "null",
             "-",
         )
