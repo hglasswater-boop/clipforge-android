@@ -14,8 +14,9 @@ class ActiveCutSessionStoreTest {
 
     @After
     fun tearDown() {
+        ProcessingStateStore.idle()
         ActiveCutSessionStore.resetForTest()
-        roots.forEach(File::deleteRecursively)
+        roots.forEach { root -> root.deleteRecursively() }
     }
 
     @Test
@@ -78,10 +79,10 @@ class ActiveCutSessionStoreTest {
     }
 
     @Test
-    fun clearRemovesDurableSessionPointer() {
+    fun explicitIdleClearsThePreparedEditorMarker() {
         val cacheRoot = cacheRoot()
-        val session = session(cacheRoot, "clear")
-        ActiveCutSessionStore.prepared(
+        val session = session(cacheRoot, "idle")
+        ProcessingStateStore.cutPrepared(
             sourceUri = "content://example/video/3",
             sourceName = "video.mp4",
             sessionPath = session.absolutePath,
@@ -89,30 +90,51 @@ class ActiveCutSessionStoreTest {
             durationMs = 120_000L,
             thumbnailPaths = emptyList(),
         )
+        assertTrue(marker(session).isFile)
 
-        ActiveCutSessionStore.clear(session.absolutePath)
+        ProcessingStateStore.idle()
         ActiveCutSessionStore.resetForTest()
 
         assertNull(ActiveCutSessionStore.restore(cacheRoot))
-        assertFalse(File(session, ".active-cut-session-v1.json").exists())
+        assertFalse(marker(session).exists())
     }
 
     @Test
-    fun corruptedOrEscapingSessionMetadataIsIgnored() {
+    fun restoreRefreshesActiveDirectoryBeforeStaleCleanup() {
         val cacheRoot = cacheRoot()
-        val session = session(cacheRoot, "corrupt")
-        File(session, ".active-cut-session-v1.json").writeText(
-            """{"version":1,"sourceUri":"content://x","sourceName":"x.mp4","sessionPath":"/tmp/not-this-session","durationMs":1000,"phase":"EDITING","updatedAt":1,"thumbnailPaths":[]}""",
+        val session = session(cacheRoot, "retained")
+        ActiveCutSessionStore.prepared(
+            sourceUri = "content://example/video/4",
+            sourceName = "video.mp4",
+            sessionPath = session.absolutePath,
+            localPath = null,
+            durationMs = 120_000L,
+            thumbnailPaths = emptyList(),
         )
+        assertTrue(session.setLastModified(1L))
+        ActiveCutSessionStore.resetForTest()
 
-        assertNull(ActiveCutSessionStore.restore(cacheRoot))
-        assertFalse(File(session, ".active-cut-session-v1.json").exists())
+        assertEquals(ActiveCutSessionPhase.EDITING, ActiveCutSessionStore.restore(cacheRoot)?.phase)
+        assertTrue(session.lastModified() > 1L)
     }
 
-    private fun cacheRoot(): File = Files.createTempDirectory("clipforge-cache-").toFile().also(roots::add)
+    @Test
+    fun corruptedSessionMetadataIsIgnoredAndRemoved() {
+        val cacheRoot = cacheRoot()
+        val session = session(cacheRoot, "corrupt")
+        marker(session).writeBytes(byteArrayOf(1, 2, 3, 4, 5, 6))
+
+        assertNull(ActiveCutSessionStore.restore(cacheRoot))
+        assertFalse(marker(session).exists())
+    }
+
+    private fun cacheRoot(): File =
+        Files.createTempDirectory("clipforge-cache-").toFile().also(roots::add)
 
     private fun session(cacheRoot: File, name: String): File =
         File(cacheRoot, "clipforge/external-edit/$name").apply {
             assertTrue(mkdirs())
         }
+
+    private fun marker(session: File): File = File(session, ".active-cut-session-v1.bin")
 }
