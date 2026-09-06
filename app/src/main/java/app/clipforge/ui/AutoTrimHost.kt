@@ -2,11 +2,9 @@ package app.clipforge.ui
 
 import android.net.Uri
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -30,7 +28,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -42,45 +39,76 @@ import androidx.media3.ui.PlayerView
 import app.clipforge.MainViewModel
 import app.clipforge.TrimEditorState
 import app.clipforge.media.AutoTrimAnalysis
+import app.clipforge.media.AutoTrimAnalyzer
 import app.clipforge.media.AutoTrimCandidate
 import app.clipforge.media.AutoTrimEvidence
-import app.clipforge.media.AutoTrimAnalyzer
 import app.clipforge.media.AutoTrimSide
+import app.clipforge.media.AutoTrimStateStore
+import app.clipforge.media.AutoTrimUiState
+import app.clipforge.processing.AutoTrimAnalysisService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.File
 import java.util.Locale
 
+@Composable
+fun AutoTrimEntryButton(
+    editor: TrimEditorState,
+    enabled: Boolean,
+) {
+    val context = LocalContext.current
+    val autoState by AutoTrimStateStore.state.collectAsStateWithLifecycle()
+    val currentSession = autoState.sessionPath == editor.sessionPath
+    val hasCurrentState = currentSession && (
+        autoState.running || autoState.analysis != null || autoState.error != null
+    )
+
+    Button(
+        onClick = {
+            if (hasCurrentState) {
+                AutoTrimStateStore.show(editor.sessionPath)
+            } else {
+                AutoTrimAnalysisService.start(
+                    context = context.applicationContext,
+                    sourceUri = editor.sourceUri,
+                    sessionPath = editor.sessionPath,
+                    localInputPath = editor.localPath,
+                    durationMs = editor.durationMs,
+                )
+            }
+        },
+        enabled = enabled,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Text(
+            when {
+                currentSession && autoState.running -> "前後を自動解析中…"
+                currentSession && autoState.analysis != null -> "自動解析結果を開く"
+                currentSession && autoState.error != null -> "自動解析を確認"
+                else -> "前後を自動検出"
+            },
+        )
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AutoTrimHost(viewModel: MainViewModel) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val editor = state.trimEditor ?: return
-    if (state.busy) return
+    val autoState by AutoTrimStateStore.state.collectAsStateWithLifecycle()
+    if (autoState.sessionPath != editor.sessionPath || !autoState.visible) return
 
-    var open by remember(editor.sessionPath) { mutableStateOf(false) }
-
-    Box(
-        modifier = Modifier.fillMaxSize(),
-        contentAlignment = Alignment.BottomEnd,
+    ModalBottomSheet(
+        onDismissRequest = { AutoTrimStateStore.dismiss(editor.sessionPath) },
     ) {
-        Button(
-            onClick = { open = true },
-            modifier = Modifier.padding(end = 16.dp, bottom = 82.dp),
-        ) {
-            Text("前後を自動検出")
-        }
-    }
-
-    if (open) {
-        ModalBottomSheet(onDismissRequest = { open = false }) {
-            AutoTrimSheet(
-                viewModel = viewModel,
-                editor = editor,
-                onClose = { open = false },
-            )
-        }
+        AutoTrimSheet(
+            viewModel = viewModel,
+            editor = editor,
+            autoState = autoState,
+            onClose = { AutoTrimStateStore.dismiss(editor.sessionPath) },
+        )
     }
 }
 
@@ -88,14 +116,12 @@ fun AutoTrimHost(viewModel: MainViewModel) {
 private fun AutoTrimSheet(
     viewModel: MainViewModel,
     editor: TrimEditorState,
+    autoState: AutoTrimUiState,
     onClose: () -> Unit,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val analyzer = remember(context) { AutoTrimAnalyzer(context.applicationContext) }
-    var analysis by remember(editor.sessionPath) { mutableStateOf<AutoTrimAnalysis?>(null) }
-    var analyzing by remember(editor.sessionPath) { mutableStateOf(false) }
-    var error by remember(editor.sessionPath) { mutableStateOf<String?>(null) }
     var notice by remember(editor.sessionPath) { mutableStateOf<String?>(null) }
     var previewStopMs by remember(editor.sessionPath) { mutableStateOf<Long?>(null) }
 
@@ -123,26 +149,17 @@ private fun AutoTrimSheet(
         }
     }
 
-    suspend fun runAnalysis() {
-        if (analyzing) return
-        analyzing = true
-        error = null
+    fun startAnalysis() {
+        player.pause()
+        previewStopMs = null
         notice = null
-        try {
-            analysis = analyzer.analyze(
-                sourceUri = editor.sourceUri,
-                localInputPath = editor.localPath,
-                durationMs = editor.durationMs,
-            )
-        } catch (failure: Throwable) {
-            error = failure.message ?: failure.javaClass.simpleName
-        } finally {
-            analyzing = false
-        }
-    }
-
-    LaunchedEffect(editor.sessionPath) {
-        runAnalysis()
+        AutoTrimAnalysisService.start(
+            context = context.applicationContext,
+            sourceUri = editor.sourceUri,
+            sessionPath = editor.sessionPath,
+            localInputPath = editor.localPath,
+            durationMs = editor.durationMs,
+        )
     }
 
     fun preview(candidate: AutoTrimCandidate) {
@@ -165,7 +182,7 @@ private fun AutoTrimSheet(
             AutoTrimSide.START -> "先頭の候補を削除リストへ追加しました"
             AutoTrimSide.END -> "末尾の候補を削除リストへ追加しました"
         }
-        analysis?.let { currentAnalysis ->
+        autoState.analysis?.let { currentAnalysis ->
             scope.launch(Dispatchers.IO) {
                 analyzer.rememberConfirmed(
                     analysis = currentAnalysis,
@@ -185,7 +202,7 @@ private fun AutoTrimSheet(
     ) {
         Text("前後の不要動画を自動検出", style = MaterialTheme.typography.headlineSmall)
         Text(
-            "先頭と末尾だけを解析します。映像の切替・黒画面・音声の変化・過去に採用した前後動画の指紋を組み合わせ、候補を順位付けします。",
+            "先頭と末尾だけを解析します。解析はバックグラウンドでも継続し、戻ったときに同じ結果画面へ復帰します。",
             style = MaterialTheme.typography.bodyMedium,
         )
 
@@ -201,22 +218,32 @@ private fun AutoTrimSheet(
         )
         Text("候補の「±5秒確認」で境界の前後だけ再生します。", style = MaterialTheme.typography.bodySmall)
 
-        if (analyzing) {
+        if (autoState.running) {
             Card(Modifier.fillMaxWidth()) {
                 Column(
                     Modifier.padding(12.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         CircularProgressIndicator(modifier = Modifier.height(28.dp))
-                        Text("  前後だけ解析中…")
+                        Text("前後だけ解析中…")
                     }
                     LinearProgressIndicator(Modifier.fillMaxWidth())
+                    Text(
+                        "アプリをバックグラウンドにしても解析は継続します。",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    OutlinedButton(
+                        onClick = { AutoTrimAnalysisService.cancel(context.applicationContext) },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("解析をキャンセル")
+                    }
                 }
             }
         }
 
-        analysis?.let { result ->
+        autoState.analysis?.let { result ->
             CandidateSection(
                 title = "先頭",
                 emptyText = "先頭側に明確な境界候補は見つかりませんでした。",
@@ -238,18 +265,18 @@ private fun AutoTrimSheet(
         }
 
         notice?.let { Text(it, color = MaterialTheme.colorScheme.primary) }
-        error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+        autoState.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
 
         Row(
             Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             OutlinedButton(
-                onClick = { scope.launch { runAnalysis() } },
-                enabled = !analyzing,
+                onClick = ::startAnalysis,
+                enabled = !autoState.running,
                 modifier = Modifier.weight(1f),
             ) {
-                Text("再解析")
+                Text(if (autoState.analysis == null) "解析する" else "再解析")
             }
             TextButton(
                 onClick = onClose,
