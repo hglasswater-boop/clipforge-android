@@ -58,6 +58,16 @@ class SceneChangeDetectorTest {
     fun coarseFilterUsesLowerResolutionAndStricterSceneThreshold() {
         val filter = sceneVideoFilter(SceneScanMode.COARSE)
         assertTrue(filter.contains("scale=240"))
-        assertTrue(filter.contains("gt(scene\\,0.40)"))
+        assertTrue(filter.contains("gt(scene,0.40)"))
+    }
+
+    @Test
+    fun preciseFilterGraphKeepsAContinuousProgressBranch() {
+        val graph = preciseSceneFilterGraph()
+
+        assertTrue(graph.startsWith("[0:V:0]"))
+        assertTrue(graph.contains("split=2[progress_src][scene_src]"))
+        assertTrue(graph.contains("[progress_src]fps=1[progress]"))
+        assertTrue(graph.contains("[scene_src]select='gt(scene,0.35)',showinfo[changes]"))
     }
 }
