@@ -1,12 +1,14 @@
 package app.clipforge
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.viewModels
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,7 +22,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.lifecycle.viewmodel.compose.viewModel
 import app.clipforge.media.AutoTrimStateStore
 import app.clipforge.processing.AutoTrimAnalysisService
 import app.clipforge.ui.AutoTrimEntryButton
@@ -32,12 +33,14 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
+    private val mainViewModel: MainViewModel by viewModels()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         requestNotificationPermissionOnce()
+        handleIncomingIntent(intent)
         setContent {
-            val mainViewModel: MainViewModel = viewModel()
             val mainState by mainViewModel.uiState.collectAsStateWithLifecycle()
             val dark = isSystemInDarkTheme()
 
@@ -91,6 +94,26 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleIncomingIntent(intent)
+    }
+
+    private fun handleIncomingIntent(incoming: Intent?) {
+        val source = incoming ?: return
+        val uris = sharedVideoUris(source)
+        if (uris.isEmpty()) return
+
+        mainViewModel.acceptPickedUris(uris)
+
+        // Consume the share payload so a configuration change does not import the same files again.
+        source.action = Intent.ACTION_MAIN
+        source.data = null
+        source.clipData = null
+        source.replaceExtras(Bundle())
     }
 
     private fun requestNotificationPermissionOnce() {
