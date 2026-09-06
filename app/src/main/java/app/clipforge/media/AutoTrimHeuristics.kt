@@ -145,12 +145,12 @@ internal fun rankAutoTrimCandidates(
             sceneMarkers = sceneMarkers,
             audioSignals = audioSignals,
         )
+        // Directional activity is useful when it agrees with an edge transition, but appended clips
+        // can be either busier or quieter than the main feature. Never veto a strong local boundary
+        // just because the activity direction is opposite to the historical heuristic.
         if (transitionStrength >= MIN_DIRECTIONAL_TRANSITION_STRENGTH) {
             score += (0.10 + transitionStrength * 0.14).coerceAtMost(MAX_DIRECTIONAL_BONUS)
             evidence += AutoTrimEvidence.SCENE_DENSITY
-        } else if (transitionStrength <= -MIN_OPPOSITE_TRANSITION_STRENGTH) {
-            score -= ((-transitionStrength - MIN_OPPOSITE_TRANSITION_STRENGTH) * 0.18)
-                .coerceAtMost(MAX_OPPOSITE_TRANSITION_PENALTY)
         }
 
         if (evidence.isEmpty()) return@forEach
@@ -169,11 +169,8 @@ internal fun rankAutoTrimCandidates(
         compareByDescending<RankedCandidate> {
             AutoTrimEvidence.KNOWN_CLIP in it.candidate.evidence
         }
-            .thenByDescending {
-                it.directionalTransitionStrength >= MIN_DIRECTIONAL_TRANSITION_STRENGTH
-            }
-            .thenByDescending(RankedCandidate::directionalTransitionStrength)
-            .thenByDescending { it.candidate.confidence },
+            .thenByDescending { it.candidate.confidence }
+            .thenByDescending(RankedCandidate::directionalTransitionStrength),
     )
     val separated = mutableListOf<AutoTrimCandidate>()
     ordered.forEach { rankedCandidate ->
@@ -235,14 +232,10 @@ private fun clusterTimes(times: List<Long>, toleranceMs: Long): List<Long> {
 }
 
 /**
- * Estimates whether a candidate looks like an edge-clip entry/exit rather than an internal cut.
- *
- * START wants activity to fall after the boundary: noisy intro -> main feature.
- * END wants activity to rise after the boundary: main feature -> appended trailer/outro.
- *
- * Audio is scanned across the entire edge window, so it is the primary density signal. Precise
- * scene markers are deliberately down-weighted because sparse refinement only decodes selected
- * short windows and therefore cannot represent whole-window density by itself.
+ * Adds a modest preference for the historically common edge profile without assuming it is
+ * universal. START often transitions from a busy intro to the main feature; END often transitions
+ * from the main feature into a busier trailer/outro. Real appended clips can also be quieter, so
+ * opposite direction is intentionally neutral rather than a rejection signal.
  */
 private fun directionalTransitionStrength(
     side: AutoTrimSide,
@@ -305,9 +298,7 @@ private const val TRANSITION_GUARD_MS = 2_000L
 private const val MIN_DENSITY_WINDOW_MINUTES = 0.20
 private const val MIN_TOTAL_ACTIVITY_DENSITY = 0.50
 private const val MIN_DIRECTIONAL_TRANSITION_STRENGTH = 0.22
-private const val MIN_OPPOSITE_TRANSITION_STRENGTH = 0.35
 private const val MAX_DIRECTIONAL_BONUS = 0.24
-private const val MAX_OPPOSITE_TRANSITION_PENALTY = 0.10
 private const val MIN_CANDIDATE_SEPARATION_MS = 5_000L
 private const val MAX_CANDIDATES_PER_SIDE = 3
 private const val VISUAL_PAIR_TOLERANCE_MS = 4_000L
