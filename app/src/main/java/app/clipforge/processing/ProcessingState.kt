@@ -28,6 +28,10 @@ object ProcessingStateStore {
     val state = _state.asStateFlow()
 
     fun idle() {
+        val current = _state.value
+        if (current is ProcessingState.CutPrepared) {
+            ActiveCutSessionStore.clear(current.sessionPath)
+        }
         _state.value = ProcessingState.Idle
     }
 
@@ -46,7 +50,18 @@ object ProcessingStateStore {
         localPath: String?,
         durationMs: Long,
         thumbnailPaths: List<String>,
+        persistActiveSession: Boolean = true,
     ) {
+        if (persistActiveSession) {
+            ActiveCutSessionStore.prepared(
+                sourceUri = sourceUri,
+                sourceName = sourceName,
+                sessionPath = sessionPath,
+                localPath = localPath,
+                durationMs = durationMs,
+                thumbnailPaths = thumbnailPaths,
+            )
+        }
         _state.value = ProcessingState.CutPrepared(
             sourceUri = sourceUri,
             sourceName = sourceName,
