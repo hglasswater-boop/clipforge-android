@@ -15,16 +15,18 @@ enum class AutoTrimPhase(val label: String) {
     COMPLETE("解析完了"),
 }
 
+internal fun autoTrimMonotonicMs(): Long = System.nanoTime() / 1_000_000L
+
 data class AutoTrimProgress(
     val phase: AutoTrimPhase = AutoTrimPhase.PREPARING,
     val percent: Int = 0,
     val startedAtElapsedMs: Long = 0L,
     val updatedAtElapsedMs: Long = 0L,
 ) {
-    fun elapsedMs(nowElapsedMs: Long = android.os.SystemClock.elapsedRealtime()): Long =
+    fun elapsedMs(nowElapsedMs: Long = autoTrimMonotonicMs()): Long =
         if (startedAtElapsedMs <= 0L) 0L else (nowElapsedMs - startedAtElapsedMs).coerceAtLeast(0L)
 
-    fun estimatedRemainingMs(nowElapsedMs: Long = android.os.SystemClock.elapsedRealtime()): Long? {
+    fun estimatedRemainingMs(nowElapsedMs: Long = autoTrimMonotonicMs()): Long? {
         val safePercent = percent.coerceIn(0, 100)
         if (safePercent <= 0 || safePercent >= 100) return null
         val elapsed = elapsedMs(nowElapsedMs)
@@ -51,7 +53,7 @@ object AutoTrimStateStore {
     private val _state = MutableStateFlow(AutoTrimUiState())
     val state = _state.asStateFlow()
 
-    fun begin(sessionPath: String, nowElapsedMs: Long = android.os.SystemClock.elapsedRealtime()) {
+    fun begin(sessionPath: String, nowElapsedMs: Long = autoTrimMonotonicMs()) {
         _state.value = AutoTrimUiState(
             sessionPath = sessionPath,
             visible = true,
@@ -69,7 +71,7 @@ object AutoTrimStateStore {
         sessionPath: String,
         phase: AutoTrimPhase,
         percent: Int,
-        nowElapsedMs: Long = android.os.SystemClock.elapsedRealtime(),
+        nowElapsedMs: Long = autoTrimMonotonicMs(),
     ) {
         val current = _state.value
         if (current.sessionPath != sessionPath || !current.running) return
@@ -87,7 +89,7 @@ object AutoTrimStateStore {
 
     fun ready(sessionPath: String, analysis: AutoTrimAnalysis) {
         val current = _state.value
-        val now = android.os.SystemClock.elapsedRealtime()
+        val now = autoTrimMonotonicMs()
         _state.value = AutoTrimUiState(
             sessionPath = sessionPath,
             visible = true,
