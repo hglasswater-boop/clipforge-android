@@ -131,7 +131,9 @@ object ActiveCutSessionStore {
             .put("updatedAt", snapshot.updatedAtEpochMs)
             .put(
                 "thumbnailPaths",
-                JSONArray().apply { snapshot.thumbnailPaths.forEach(::put) },
+                JSONArray().apply {
+                    snapshot.thumbnailPaths.forEach { path -> put(path) }
+                },
             )
             .toString()
 
@@ -175,7 +177,7 @@ object ActiveCutSessionStore {
         val thumbnails = buildList {
             val array = root.optJSONArray("thumbnailPaths") ?: JSONArray()
             for (index in 0 until array.length()) {
-                val path = array.optString(index).takeIf(String::isNotBlank) ?: continue
+                val path = array.optString(index).takeIf { it.isNotBlank() } ?: continue
                 val file = File(path)
                 if (file.isFile && isInside(file, sessionDir)) add(file.absolutePath)
             }
