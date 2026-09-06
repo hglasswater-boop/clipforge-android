@@ -28,7 +28,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.HorizontalDivider
@@ -251,7 +250,6 @@ private fun TrimEditorScreen(viewModel: MainViewModel, state: MainUiState, edito
     var previewSelection by remember(editor.sessionPath) { mutableStateOf(false) }
     var playheadMs by remember(editor.sessionPath) { mutableStateOf(0L) }
     var keyframeNavigationBusy by remember(editor.sessionPath) { mutableStateOf(false) }
-    var showDiscardDialog by remember(editor.sessionPath) { mutableStateOf(false) }
 
     LaunchedEffect(editor.sessionPath) {
         viewModel.loadTrimThumbnails()
@@ -281,6 +279,14 @@ private fun TrimEditorScreen(viewModel: MainViewModel, state: MainUiState, edito
 
     fun seekBy(deltaMs: Long) {
         player.seekTo((player.currentPosition + deltaMs).coerceIn(0L, editor.durationMs))
+    }
+
+    fun jumpTo(positionMs: Long) {
+        previewSelection = false
+        player.pause()
+        val target = positionMs.coerceIn(0L, editor.durationMs)
+        player.seekTo(target)
+        playheadMs = target
     }
 
     fun jumpKeyframe(forward: Boolean) {
@@ -314,34 +320,11 @@ private fun TrimEditorScreen(viewModel: MainViewModel, state: MainUiState, edito
 
     fun requestCloseEditor() {
         if (state.busy) return
-        if (editor.cutRanges.isNotEmpty()) {
-            showDiscardDialog = true
-        } else {
-            viewModel.cancelTrimEditor()
-        }
+        viewModel.cancelTrimEditor()
     }
 
     BackHandler {
         requestCloseEditor()
-    }
-
-    if (showDiscardDialog) {
-        AlertDialog(
-            onDismissRequest = { showDiscardDialog = false },
-            title = { Text("編集内容を破棄しますか？") },
-            text = { Text("追加した削除範囲は保存されません。") },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        showDiscardDialog = false
-                        viewModel.cancelTrimEditor()
-                    },
-                ) { Text("破棄する") }
-            },
-            dismissButton = {
-                TextButton(onClick = { showDiscardDialog = false }) { Text("編集を続ける") }
-            },
-        )
     }
 
     Scaffold(
@@ -378,6 +361,10 @@ private fun TrimEditorScreen(viewModel: MainViewModel, state: MainUiState, edito
                             overflow = TextOverflow.Ellipsis,
                             style = MaterialTheme.typography.titleMedium,
                         )
+                        Text(
+                            "切断点とカット方式はアプリ内に自動保存されます",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
                     }
                     TextButton(onClick = ::requestCloseEditor, enabled = !state.busy) {
                         Text("終了")
@@ -408,6 +395,8 @@ private fun TrimEditorScreen(viewModel: MainViewModel, state: MainUiState, edito
                     sceneNavigationBusy = state.sceneSearchBusy,
                     sceneMarkerCount = state.sceneMarkers.count { it.kind == SceneMarkerKind.SCENE_CHANGE },
                     blackMarkerCount = state.sceneMarkers.count { it.kind == SceneMarkerKind.BLACK },
+                    onJumpStart = { jumpTo(0L) },
+                    onJumpEnd = { jumpTo(editor.durationMs) },
                     onSeekBy = ::seekBy,
                     onPreviousKeyframe = { jumpKeyframe(false) },
                     onNextKeyframe = { jumpKeyframe(true) },
@@ -584,6 +573,8 @@ private fun EditorTransportControls(
     sceneNavigationBusy: Boolean,
     sceneMarkerCount: Int,
     blackMarkerCount: Int,
+    onJumpStart: () -> Unit,
+    onJumpEnd: () -> Unit,
     onSeekBy: (Long) -> Unit,
     onPreviousKeyframe: () -> Unit,
     onNextKeyframe: () -> Unit,
@@ -609,6 +600,21 @@ private fun EditorTransportControls(
                     "${formatTime(playheadMs)} / ${formatTime(durationMs)}",
                     style = MaterialTheme.typography.titleMedium,
                 )
+            }
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                OutlinedButton(
+                    onClick = onJumpStart,
+                    enabled = enabled,
+                    modifier = Modifier.weight(1f),
+                ) { Text("⏮ 先頭へ") }
+                OutlinedButton(
+                    onClick = onJumpEnd,
+                    enabled = enabled,
+                    modifier = Modifier.weight(1f),
+                ) { Text("末尾へ ⏭") }
             }
             listOf(10L, 5L, 1L).forEach { seconds ->
                 Row(
