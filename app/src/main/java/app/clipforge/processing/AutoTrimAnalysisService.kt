@@ -77,7 +77,12 @@ class AutoTrimAnalysisService : Service() {
         acquireWakeLock()
 
         analysisJob = serviceScope.launch {
+            var providerLeases: ContentProviderLeaseSet? = null
             try {
+                providerLeases = ContentProviderLeaseSet.acquire(
+                    contentResolver = contentResolver,
+                    uriStrings = if (localInputPath == null) listOf(sourceUri) else emptyList(),
+                )
                 val analysis = AutoTrimAnalyzer(applicationContext).analyze(
                     sourceUri = sourceUri,
                     localInputPath = localInputPath,
@@ -108,6 +113,7 @@ class AutoTrimAnalysisService : Service() {
                     }
                 }
             } finally {
+                providerLeases?.close()
                 releaseWakeLock()
                 analysisJob = null
                 cancellationRequested = false
