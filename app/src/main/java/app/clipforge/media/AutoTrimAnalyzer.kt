@@ -19,7 +19,6 @@ import java.util.Locale
 import kotlin.coroutines.coroutineContext
 import kotlin.math.abs
 import kotlin.math.max
-import kotlin.math.min
 import kotlin.math.roundToLong
 
 data class AutoTrimAnalysis(
@@ -51,6 +50,7 @@ class AutoTrimAnalyzer(context: Context) {
         sourceUri: String,
         localInputPath: String?,
         durationMs: Long,
+        edgeWindowMs: Long = AutoTrimRangeSettings.DEFAULT_EDGE_WINDOW_MS,
         onProgress: (AutoTrimProgress) -> Unit = {},
     ): AutoTrimAnalysis = withContext(Dispatchers.IO) {
         require(durationMs > 1L) { "動画の長さを取得できません" }
@@ -60,9 +60,9 @@ class AutoTrimAnalyzer(context: Context) {
         }
 
         emit(AutoTrimPhase.PREPARING, 0.0)
-        val edgeWindowMs = edgeWindowFor(durationMs)
-        val startRange = MediaSegment(0L, edgeWindowMs)
-        val endRange = MediaSegment((durationMs - edgeWindowMs).coerceAtLeast(0L), durationMs)
+        val resolvedEdgeWindowMs = edgeWindowFor(durationMs, edgeWindowMs)
+        val startRange = MediaSegment(0L, resolvedEdgeWindowMs)
+        val endRange = MediaSegment((durationMs - resolvedEdgeWindowMs).coerceAtLeast(0L), durationMs)
         emit(AutoTrimPhase.PREPARING, 1.0)
 
         val startScenes = detectScenes(
@@ -98,12 +98,12 @@ class AutoTrimAnalyzer(context: Context) {
             sourceUri = sourceUri,
             localInputPath = localInputPath,
             durationMs = durationMs,
-            edgeWindowMs = edgeWindowMs,
+            edgeWindowMs = resolvedEdgeWindowMs,
             onProgress = { emit(AutoTrimPhase.VISUAL_FINGERPRINT, it) },
         )
         val startFingerprint = EdgeFingerprintSnapshot(
             side = AutoTrimSide.START,
-            edgeDurationMs = edgeWindowMs,
+            edgeDurationMs = resolvedEdgeWindowMs,
             visual = visual.first,
             audio = startAudio.samples.map {
                 AudioFingerprintPoint(
@@ -114,7 +114,7 @@ class AutoTrimAnalyzer(context: Context) {
         )
         val endFingerprint = EdgeFingerprintSnapshot(
             side = AutoTrimSide.END,
-            edgeDurationMs = edgeWindowMs,
+            edgeDurationMs = resolvedEdgeWindowMs,
             visual = visual.second,
             audio = endAudio.samples.map {
                 AudioFingerprintPoint(
@@ -380,15 +380,14 @@ class AutoTrimAnalyzer(context: Context) {
         }
     }
 
-    private fun edgeWindowFor(durationMs: Long): Long {
-        val preferred = max(MIN_EDGE_WINDOW_MS, durationMs / 3L)
-        return min(MAX_EDGE_WINDOW_MS, preferred)
-            .coerceAtMost((durationMs / 2L).coerceAtLeast(1L))
+    private fun edgeWindowFor(durationMs: Long, requestedEdgeWindowMs: Long): Long {
+        val requested = normalizeAutoTrimEdgeWindowMs(requestedEdgeWindowMs)
+            .coerceAtLeast(MIN_EDGE_WINDOW_MS)
+        return requested.coerceAtMost((durationMs / 2L).coerceAtLeast(1L))
     }
 
     private companion object {
         const val MIN_EDGE_WINDOW_MS = 30_000L
-        const val MAX_EDGE_WINDOW_MS = 10 * 60_000L
         const val MIN_VISUAL_SAMPLE_INTERVAL_MS = 5_000L
         const val MAX_VISUAL_SAMPLES_PER_EDGE = 80L
         const val MIN_LEARNED_CLIP_MS = 15_000L
