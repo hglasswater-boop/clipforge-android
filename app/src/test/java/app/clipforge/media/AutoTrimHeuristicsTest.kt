@@ -56,6 +56,60 @@ class AutoTrimHeuristicsTest {
     }
 
     @Test
+    fun `end ranking prefers entry into appended clip over a stronger internal cut`() {
+        val candidates = rankAutoTrimCandidates(
+            side = AutoTrimSide.END,
+            durationMs = 600_000L,
+            windowStartMs = 300_000L,
+            windowEndMs = 600_000L,
+            sceneMarkers = listOf(
+                // Actual main-feature -> appended-clip transition.
+                SceneMarker(360_000L, SceneMarkerKind.SCENE_CHANGE),
+                // A visually stronger cut inside the appended clip.
+                SceneMarker(450_000L, SceneMarkerKind.SCENE_CHANGE),
+                SceneMarker(450_150L, SceneMarkerKind.BLACK),
+            ),
+            audioSignals = listOf(
+                AutoTrimAudioSignal(360_200L, AutoTrimAudioSignalKind.LEVEL_JUMP),
+                // Activity rises and remains busy after the true boundary.
+                AutoTrimAudioSignal(370_000L, AutoTrimAudioSignalKind.LEVEL_JUMP),
+                AutoTrimAudioSignal(380_000L, AutoTrimAudioSignalKind.LEVEL_JUMP),
+                AutoTrimAudioSignal(390_000L, AutoTrimAudioSignalKind.SILENCE_START),
+                AutoTrimAudioSignal(400_000L, AutoTrimAudioSignalKind.SILENCE_END),
+                AutoTrimAudioSignal(420_000L, AutoTrimAudioSignalKind.LEVEL_JUMP),
+                AutoTrimAudioSignal(430_000L, AutoTrimAudioSignalKind.LEVEL_JUMP),
+                AutoTrimAudioSignal(440_000L, AutoTrimAudioSignalKind.LEVEL_JUMP),
+                AutoTrimAudioSignal(450_250L, AutoTrimAudioSignalKind.LEVEL_JUMP),
+                AutoTrimAudioSignal(460_000L, AutoTrimAudioSignalKind.LEVEL_JUMP),
+                AutoTrimAudioSignal(470_000L, AutoTrimAudioSignalKind.LEVEL_JUMP),
+                AutoTrimAudioSignal(480_000L, AutoTrimAudioSignalKind.SILENCE_START),
+                AutoTrimAudioSignal(490_000L, AutoTrimAudioSignalKind.SILENCE_END),
+            ),
+        )
+
+        assertTrue(abs(candidates.first().boundaryMs - 360_000L) <= 1_000L)
+        assertTrue(AutoTrimEvidence.SCENE_DENSITY in candidates.first().evidence)
+    }
+
+    @Test
+    fun `end ranking keeps evidence score ordering when no directional profile exists`() {
+        val candidates = rankAutoTrimCandidates(
+            side = AutoTrimSide.END,
+            durationMs = 600_000L,
+            windowStartMs = 300_000L,
+            windowEndMs = 600_000L,
+            sceneMarkers = listOf(
+                SceneMarker(420_000L, SceneMarkerKind.SCENE_CHANGE),
+                SceneMarker(500_000L, SceneMarkerKind.SCENE_CHANGE),
+                SceneMarker(500_100L, SceneMarkerKind.BLACK),
+            ),
+            audioSignals = emptyList(),
+        )
+
+        assertTrue(abs(candidates.first().boundaryMs - 500_000L) <= 1_000L)
+    }
+
+    @Test
     fun `similar visual fingerprint survives small encoding differences`() {
         val known = KnownClipFingerprint(
             side = AutoTrimSide.START,
