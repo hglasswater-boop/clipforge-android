@@ -25,6 +25,18 @@ object AutoTrimStateStore {
     private var lastDurableProgressPhase: AutoTrimPhase? = null
 
     @Synchronized
+    fun open(sessionPath: String) {
+        val current = _state.value
+        val next = if (current.sessionPath == sessionPath) {
+            current.copy(visible = true)
+        } else {
+            AutoTrimUiState(sessionPath = sessionPath, visible = true)
+        }
+        _state.value = next
+        if (next.hasPayload()) persist(next, wait = false)
+    }
+
+    @Synchronized
     fun begin(sessionPath: String) {
         val current = _state.value
         val next = AutoTrimUiState(
@@ -137,7 +149,7 @@ object AutoTrimStateStore {
         if (current.sessionPath != sessionPath) return
         val next = current.copy(visible = false)
         _state.value = next
-        persist(next, wait = false)
+        if (next.hasPayload()) persist(next, wait = false)
     }
 
     /**
