@@ -12,7 +12,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -38,13 +37,13 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import app.clipforge.MainViewModel
 import app.clipforge.TrimEditorState
-import app.clipforge.media.AutoTrimAnalysis
 import app.clipforge.media.AutoTrimAnalyzer
 import app.clipforge.media.AutoTrimCandidate
 import app.clipforge.media.AutoTrimEvidence
 import app.clipforge.media.AutoTrimSide
 import app.clipforge.media.AutoTrimStateStore
 import app.clipforge.media.AutoTrimUiState
+import app.clipforge.media.autoTrimMonotonicMs
 import app.clipforge.processing.AutoTrimAnalysisService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -83,7 +82,8 @@ fun AutoTrimEntryButton(
     ) {
         Text(
             when {
-                currentSession && autoState.running -> "前後を自動解析中…"
+                currentSession && autoState.running ->
+                    "前後を自動解析中 ${autoState.progress?.percent ?: 0}%"
                 currentSession && autoState.analysis != null -> "自動解析結果を開く"
                 currentSession && autoState.error != null -> "自動解析を確認"
                 else -> "前後を自動検出"
@@ -124,6 +124,7 @@ private fun AutoTrimSheet(
     val analyzer = remember(context) { AutoTrimAnalyzer(context.applicationContext) }
     var notice by remember(editor.sessionPath) { mutableStateOf<String?>(null) }
     var previewStopMs by remember(editor.sessionPath) { mutableStateOf<Long?>(null) }
+    var progressNowMs by remember(editor.sessionPath) { mutableStateOf(autoTrimMonotonicMs()) }
 
     val mediaUri = editor.localPath?.let { Uri.fromFile(File(it)) } ?: Uri.parse(editor.sourceUri)
     val player = remember(editor.sessionPath) {
@@ -146,6 +147,13 @@ private fun AutoTrimSheet(
                 break
             }
             delay(50)
+        }
+    }
+
+    LaunchedEffect(autoState.running) {
+        while (autoState.running) {
+            progressNowMs = autoTrimMonotonicMs()
+            delay(1_000L)
         }
     }
 
@@ -219,18 +227,36 @@ private fun AutoTrimSheet(
         Text("候補の「±5秒確認」で境界の前後だけ再生します。", style = MaterialTheme.typography.bodySmall)
 
         if (autoState.running) {
+            val progress = autoState.progress
+            val percent = progress?.percent?.coerceIn(0, 99) ?: 0
+            val elapsedMs = progress?.elapsedMs(progressNowMs) ?: 0L
+            val etaMs = progress?.estimatedRemainingMs(progressNowMs)
             Card(Modifier.fillMaxWidth()) {
                 Column(
                     Modifier.padding(12.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        CircularProgressIndicator(modifier = Modifier.height(28.dp))
-                        Text("前後だけ解析中…")
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Text(progress?.phase?.label ?: "解析を準備中")
+                        Text("$percent%", style = MaterialTheme.typography.titleMedium)
                     }
-                    LinearProgressIndicator(Modifier.fillMaxWidth())
+                    LinearProgressIndicator(
+                        progress = { percent / 100f },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
                     Text(
-                        "アプリをバックグラウンドにしても解析は継続します。",
+                        buildString {
+                            append("経過 ${formatDurationShort(elapsedMs)}")
+                            append(" / 残り ")
+                            append(etaMs?.let { "約${formatDurationShort(it)}" } ?: "計算中")
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Text(
+                        "進捗は実際の解析工程とfingerprint取得数から計算しています。アプリをバックグラウンドにしても解析は継続します。",
                         style = MaterialTheme.typography.bodySmall,
                     )
                     OutlinedButton(
@@ -370,6 +396,14 @@ private fun formatAutoTime(ms: Long): String {
     } else {
         String.format(Locale.US, "%02d:%02d.%03d", minutes, seconds, millis)
     }
+}
+
+private fun formatDurationShort(ms: Long): String {
+    val totalSeconds = (ms.coerceAtLeast(0L) / 1_000L).coerceAtLeast(0L)
+    if (totalSeconds < 60L) return "${totalSeconds}秒"
+    val minutes = totalSeconds / 60L
+    val seconds = totalSeconds % 60L
+    return if (seconds == 0L) "${minutes}分" else String.format(Locale.JAPAN, "%d分%02d秒", minutes, seconds)
 }
 
 private const val PREVIEW_RADIUS_MS = 5_000L
