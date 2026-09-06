@@ -79,7 +79,10 @@ object ActiveCutSessionStore {
         if (_state.value?.sessionPath == path) _state.value = null
     }
 
-    /** Call on an IO dispatcher. Returns the newest valid session marker, if one exists. */
+    /**
+     * Restores the newest valid marker. Call before ExternalEditPipeline is constructed so the
+     * active directory can be touched and excluded from its 24-hour stale-session cleanup.
+     */
     fun restore(cacheRoot: File): ActiveCutSessionSnapshot? {
         val root = File(cacheRoot, EDIT_SESSION_RELATIVE_PATH)
         val restored = runCatching {
@@ -90,6 +93,9 @@ object ActiveCutSessionStore {
                 .mapNotNull(::read)
                 .maxByOrNull(ActiveCutSessionSnapshot::updatedAtEpochMs)
         }.getOrNull()
+        restored?.let { active ->
+            runCatching { File(active.sessionPath).setLastModified(System.currentTimeMillis()) }
+        }
         synchronized(this) {
             _state.value = restored
         }
@@ -112,6 +118,7 @@ object ActiveCutSessionStore {
             updatedAtEpochMs = System.currentTimeMillis(),
         )
         write(updated)
+        runCatching { sessionDir.setLastModified(updated.updatedAtEpochMs) }
         _state.value = updated
     }
 
@@ -156,6 +163,7 @@ object ActiveCutSessionStore {
                 StandardCopyOption.REPLACE_EXISTING,
             )
         }.getOrThrow()
+        runCatching { sessionDir.setLastModified(snapshot.updatedAtEpochMs) }
     }
 
     private fun read(sessionDir: File): ActiveCutSessionSnapshot? = runCatching {
