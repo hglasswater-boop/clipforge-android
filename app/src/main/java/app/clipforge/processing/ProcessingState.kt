@@ -25,16 +25,18 @@ sealed interface ProcessingState {
 
 object ProcessingStateStore {
     private val _state = MutableStateFlow<ProcessingState>(ProcessingState.Idle)
+    private val writeProgressEta = WriteProgressEta()
     val state = _state.asStateFlow()
 
     fun idle() {
+        writeProgressEta.reset()
         _state.value = ProcessingState.Idle
     }
 
     fun running(title: String, message: String, progressPercent: Int? = null) {
         _state.value = ProcessingState.Running(
             title = title,
-            message = message,
+            message = writeProgressEta.decorate(message),
             progressPercent = progressPercent?.coerceIn(0, 100),
         )
     }
@@ -47,6 +49,7 @@ object ProcessingStateStore {
         durationMs: Long,
         thumbnailPaths: List<String>,
     ) {
+        writeProgressEta.reset()
         _state.value = ProcessingState.CutPrepared(
             sourceUri = sourceUri,
             sourceName = sourceName,
@@ -58,14 +61,17 @@ object ProcessingStateStore {
     }
 
     fun success(message: String) {
+        writeProgressEta.reset()
         _state.value = ProcessingState.Success(message)
     }
 
     fun failure(message: String) {
+        writeProgressEta.reset()
         _state.value = ProcessingState.Failure(message)
     }
 
     fun cancelled(message: String) {
+        writeProgressEta.reset()
         _state.value = ProcessingState.Cancelled(message)
     }
 }
