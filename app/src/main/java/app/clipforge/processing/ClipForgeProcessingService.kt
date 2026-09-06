@@ -60,7 +60,7 @@ class ClipForgeProcessingService : Service() {
             return START_NOT_STICKY
         }
 
-        if (processingJob?.isActive == true) return START_REDELIVER_INTENT
+        if (processingJob?.isActive == true) return START_NOT_STICKY
         cancellationRequested = false
         timeoutFailure = null
         val redelivered = flags and START_FLAG_REDELIVERY != 0
@@ -115,7 +115,7 @@ class ClipForgeProcessingService : Service() {
                 cancellationRequested = false
                 timeoutFailure = null
                 processingJob = null
-                stopSelf(startId)
+                stopSelf()
             }
         }
         return START_REDELIVER_INTENT
@@ -229,7 +229,7 @@ class ClipForgeProcessingService : Service() {
         FFmpegKit.cancel()
         processingJob?.cancel(CancellationException("Foreground media processing timed out"))
         releaseWakeLock()
-        stopSelf(startId)
+        stopSelf()
     }
 
     override fun onDestroy() {
