@@ -22,7 +22,7 @@ data class SceneDetectionResult(
     val scannedEndMs: Long,
 )
 
-internal enum class SceneScanMode {
+enum class SceneScanMode {
     AUTO,
     COARSE,
     PRECISE,
