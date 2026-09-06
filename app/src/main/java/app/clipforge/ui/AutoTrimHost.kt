@@ -44,6 +44,7 @@ import app.clipforge.media.AutoTrimRangeSettings
 import app.clipforge.media.AutoTrimSide
 import app.clipforge.media.AutoTrimStateStore
 import app.clipforge.media.AutoTrimUiState
+import app.clipforge.media.isAutoTrimCandidateApplied
 import app.clipforge.processing.AutoTrimAnalysisService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -100,6 +101,7 @@ fun AutoTrimHost(viewModel: MainViewModel) {
             viewModel = viewModel,
             editor = editor,
             autoState = autoState,
+            processingBusy = state.busy,
             onClose = { AutoTrimStateStore.dismiss(editor.sessionPath) },
         )
     }
@@ -110,6 +112,7 @@ private fun AutoTrimSheet(
     viewModel: MainViewModel,
     editor: TrimEditorState,
     autoState: AutoTrimUiState,
+    processingBusy: Boolean,
     onClose: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -197,6 +200,13 @@ private fun AutoTrimSheet(
             }
         }
     }
+
+    fun isAccepted(candidate: AutoTrimCandidate): Boolean = isAutoTrimCandidateApplied(
+        candidate = candidate,
+        durationMs = editor.durationMs,
+        cutRanges = editor.cutRanges,
+        cutMode = editor.cutMode,
+    )
 
     Column(
         modifier = Modifier
@@ -323,6 +333,8 @@ private fun AutoTrimSheet(
                 title = "先頭",
                 emptyText = "先頭側に明確な境界候補は見つかりませんでした。",
                 candidates = result.startCandidates,
+                acceptEnabled = !processingBusy,
+                isAccepted = ::isAccepted,
                 onPreview = ::preview,
                 onAccept = ::accept,
             )
@@ -330,6 +342,8 @@ private fun AutoTrimSheet(
                 title = "末尾",
                 emptyText = "末尾側に明確な境界候補は見つかりませんでした。",
                 candidates = result.endCandidates,
+                acceptEnabled = !processingBusy,
+                isAccepted = ::isAccepted,
                 onPreview = ::preview,
                 onAccept = ::accept,
             )
@@ -396,6 +410,8 @@ private fun CandidateSection(
     title: String,
     emptyText: String,
     candidates: List<AutoTrimCandidate>,
+    acceptEnabled: Boolean,
+    isAccepted: (AutoTrimCandidate) -> Boolean,
     onPreview: (AutoTrimCandidate) -> Unit,
     onAccept: (AutoTrimCandidate) -> Unit,
 ) {
@@ -409,6 +425,7 @@ private fun CandidateSection(
                 Text(emptyText, style = MaterialTheme.typography.bodySmall)
             } else {
                 candidates.forEachIndexed { index, candidate ->
+                    val accepted = isAccepted(candidate)
                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Row(
                             Modifier.fillMaxWidth(),
@@ -433,9 +450,10 @@ private fun CandidateSection(
                             }
                             Button(
                                 onClick = { onAccept(candidate) },
+                                enabled = acceptEnabled && !accepted,
                                 modifier = Modifier.weight(1f),
                             ) {
-                                Text("採用")
+                                Text(if (accepted) "採用済み ✓" else "採用")
                             }
                         }
                     }
