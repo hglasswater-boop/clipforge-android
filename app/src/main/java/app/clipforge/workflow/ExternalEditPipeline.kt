@@ -140,6 +140,9 @@ class ExternalEditPipeline(
                     jacketFd = jacketDescriptor?.fd,
                     workingDirectory = workDir,
                 )
+                val completedOutput = requireNotNull(outputDescriptor)
+                outputDescriptor = null
+                closeOutputOrThrow { completedOutput.close() }
             } finally {
                 runCatching { outputDescriptor?.close() }
                 runCatching { jacketDescriptor?.close() }
@@ -384,11 +387,12 @@ class ExternalEditPipeline(
                 sourceSignature = sourceSignature,
                 jacketFd = jacketDescriptor?.fd,
             )
-            runCatching { outputDescriptor.close() }
+            val completedOutput = requireNotNull(outputDescriptor)
             outputDescriptor = null
+            closeOutputOrThrow { completedOutput.close() }
             runCatching { jacketDescriptor?.close() }
             jacketDescriptor = null
-            runCatching { inputDescriptor.close() }
+            runCatching { inputDescriptor?.close() }
             inputDescriptor = null
             finishOutput(destination, remoteDestination, onProgress)
             discardPreparedSession(sessionPath)
