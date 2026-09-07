@@ -137,8 +137,9 @@ class MultiCutExporter(
             }
 
             onProgress("書き出しを完了しています", 95)
-            runCatching { outputDescriptor.close() }
+            val completedOutput = requireNotNull(outputDescriptor)
             outputDescriptor = null
+            closeOutputOrThrow { completedOutput.close() }
 
             if (remoteDestination) {
                 onProgress("SMB保存を確定しています", 98)
@@ -312,13 +313,13 @@ class MultiCutExporter(
         val reencodeCount = planned.count { it is SmartCutPart.Reencode }
         if (reencodeCount == 0) {
             exportLosslessDescriptor(
-            source = source,
-            sourceSignature = sourceSignature,
-            keepSegments = keepSegments,
-            outputFd = outputFd,
-            outputName = outputName,
-            workDir = workDir,
-        ) { percent ->
+                source = source,
+                sourceSignature = sourceSignature,
+                keepSegments = keepSegments,
+                outputFd = outputFd,
+                outputName = outputName,
+                workDir = workDir,
+            ) { percent ->
                 val overall = (12 + percent * 82 / 100).coerceIn(12, 94)
                 onProgress("キーフレーム一致のため無劣化で書き出し中 $percent%", overall)
             }
