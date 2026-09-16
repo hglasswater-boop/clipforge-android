@@ -40,7 +40,7 @@ class ClipForgeProcessingService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        createNotificationChannel()
+        createNotificationChannels()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -73,9 +73,10 @@ class ClipForgeProcessingService : Service() {
             else -> return START_NOT_STICKY
         }
         val initialPercent = if (request.action == ACTION_CUT) 0 else null
+        clearPreviousResultNotification()
         updateProgress(title, "処理を準備しています", initialPercent)
         startProcessingForeground(
-            buildNotification(title, "処理を準備しています", true, initialPercent),
+            buildProgressNotification(title, "処理を準備しています", initialPercent),
         )
         acquireWakeLock()
 
@@ -282,88 +283,101 @@ class ClipForgeProcessingService : Service() {
     private fun updateProgress(title: String, message: String, progressPercent: Int? = null) {
         if (cancellationRequested) {
             getSystemService(NotificationManager::class.java).notify(
-                NOTIFICATION_ID,
-                buildNotification("ClipForge", "キャンセルしています", true, null),
+                PROGRESS_NOTIFICATION_ID,
+                buildProgressNotification("ClipForge", "キャンセルしています", null),
             )
             return
         }
         ProcessingStateStore.running(title, message, progressPercent)
         getSystemService(NotificationManager::class.java)
-            .notify(NOTIFICATION_ID, buildNotification(title, message, true, progressPercent))
+            .notify(PROGRESS_NOTIFICATION_ID, buildProgressNotification(title, message, progressPercent))
     }
 
     private fun finishPrepared(message: String) {
-        stopForeground(STOP_FOREGROUND_REMOVE)
-        getSystemService(NotificationManager::class.java)
-            .notify(NOTIFICATION_ID, buildNotification("ClipForge", message, false, 100))
+        postResultNotification(
+            title = "ClipForge・準備完了",
+            message = message,
+            icon = android.R.drawable.stat_sys_download_done,
+        )
     }
 
     private fun finishSuccess(message: String) {
         ProcessingStateStore.success(message)
-        stopForeground(STOP_FOREGROUND_REMOVE)
-        getSystemService(NotificationManager::class.java)
-            .notify(NOTIFICATION_ID, buildNotification("ClipForge", message, false, 100))
+        postResultNotification(
+            title = "ClipForge・完了",
+            message = message,
+            icon = android.R.drawable.stat_sys_download_done,
+        )
     }
 
     private fun finishFailure(message: String) {
         ProcessingStateStore.failure(message)
-        stopForeground(STOP_FOREGROUND_REMOVE)
-        getSystemService(NotificationManager::class.java)
-            .notify(NOTIFICATION_ID, buildNotification("ClipForge", message, false, null))
+        postResultNotification(
+            title = "ClipForge・エラー",
+            message = message,
+            icon = android.R.drawable.stat_notify_error,
+        )
     }
 
     private fun finishCancelled(message: String) {
         ProcessingStateStore.cancelled(message)
+        postResultNotification(
+            title = "ClipForge・キャンセル",
+            message = message,
+            icon = android.R.drawable.ic_menu_close_clear_cancel,
+        )
+    }
+
+    private fun postResultNotification(title: String, message: String, icon: Int) {
+        val manager = getSystemService(NotificationManager::class.java)
         stopForeground(STOP_FOREGROUND_REMOVE)
-        getSystemService(NotificationManager::class.java)
-            .notify(NOTIFICATION_ID, buildNotification("ClipForge", message, false, null))
+        manager.cancel(PROGRESS_NOTIFICATION_ID)
+        manager.notify(
+            RESULT_NOTIFICATION_ID,
+            buildResultNotification(title, message, icon),
+        )
+    }
+
+    private fun clearPreviousResultNotification() {
+        getSystemService(NotificationManager::class.java).cancel(RESULT_NOTIFICATION_ID)
     }
 
     @Suppress("NewApi")
     private fun startProcessingForeground(notification: Notification) {
         if (Build.VERSION.SDK_INT >= 35) {
             startForeground(
-                NOTIFICATION_ID,
+                PROGRESS_NOTIFICATION_ID,
                 notification,
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROCESSING,
             )
         } else {
-            startForeground(NOTIFICATION_ID, notification)
+            startForeground(PROGRESS_NOTIFICATION_ID, notification)
         }
     }
 
-    private fun buildNotification(
+    private fun buildProgressNotification(
         title: String,
         message: String,
-        ongoing: Boolean,
         progressPercent: Int?,
     ): Notification {
-        val openIntent = Intent(this, MainActivity::class.java)
-            .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-        val pending = PendingIntent.getActivity(
-            this,
-            0,
-            openIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
-        val builder = Notification.Builder(this, CHANNEL_ID)
+        val builder = Notification.Builder(this, PROGRESS_CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_sys_upload)
             .setContentTitle(title)
             .setContentText(message)
             .setStyle(Notification.BigTextStyle().bigText(message))
-            .setContentIntent(pending)
-            .setOngoing(ongoing)
-            .setOnlyAlertOnce(ongoing)
+            .setContentIntent(mainActivityPendingIntent())
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
             .setCategory(Notification.CATEGORY_PROGRESS)
-            .setAutoCancel(!ongoing)
+            .setAutoCancel(false)
 
         if (progressPercent != null) {
             builder.setProgress(100, progressPercent.coerceIn(0, 100), false)
         } else {
-            builder.setProgress(0, 0, ongoing)
+            builder.setProgress(0, 0, true)
         }
 
-        if (ongoing && message != "キャンセルしています") {
+        if (message != "キャンセルしています") {
             val cancelIntent = Intent(this, ClipForgeProcessingService::class.java)
                 .setAction(ACTION_CANCEL)
             val cancelPending = PendingIntent.getService(
@@ -381,15 +395,51 @@ class ClipForgeProcessingService : Service() {
         return builder.build()
     }
 
-    private fun createNotificationChannel() {
+    private fun buildResultNotification(
+        title: String,
+        message: String,
+        icon: Int,
+    ): Notification = Notification.Builder(this, RESULT_CHANNEL_ID)
+        .setSmallIcon(icon)
+        .setContentTitle(title)
+        .setContentText(message)
+        .setStyle(Notification.BigTextStyle().bigText(message))
+        .setContentIntent(mainActivityPendingIntent())
+        .setOngoing(false)
+        .setOnlyAlertOnce(false)
+        .setCategory(Notification.CATEGORY_STATUS)
+        .setAutoCancel(true)
+        .build()
+
+    private fun mainActivityPendingIntent(): PendingIntent {
+        val openIntent = Intent(this, MainActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        return PendingIntent.getActivity(
+            this,
+            0,
+            openIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+    }
+
+    private fun createNotificationChannels() {
         val manager = getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(
             NotificationChannel(
-                CHANNEL_ID,
+                PROGRESS_CHANNEL_ID,
                 "動画処理",
                 NotificationManager.IMPORTANCE_LOW,
             ).apply {
                 description = "ClipForgeの結合・カット処理の進捗"
+            },
+        )
+        manager.createNotificationChannel(
+            NotificationChannel(
+                RESULT_CHANNEL_ID,
+                "処理結果",
+                NotificationManager.IMPORTANCE_DEFAULT,
+            ).apply {
+                description = "ClipForgeの動画処理完了・失敗通知"
             },
         )
     }
@@ -421,8 +471,10 @@ class ClipForgeProcessingService : Service() {
     }
 
     companion object {
-        private const val CHANNEL_ID = "clipforge_processing"
-        private const val NOTIFICATION_ID = 4101
+        private const val PROGRESS_CHANNEL_ID = "clipforge_processing"
+        private const val RESULT_CHANNEL_ID = "clipforge_task_results"
+        private const val PROGRESS_NOTIFICATION_ID = 4101
+        private const val RESULT_NOTIFICATION_ID = 4111
         private const val ACTION_PREPARE_CUT = "app.clipforge.action.PREPARE_CUT"
         private const val ACTION_CONCAT = "app.clipforge.action.CONCAT"
         private const val ACTION_CUT = "app.clipforge.action.CUT"
