@@ -95,7 +95,7 @@ class ExternalEditPipeline(
         inputs: List<PickedVideo>,
         outputUri: String,
         outputName: String,
-        onProgress: (String) -> Unit = {},
+        onProgress: (message: String, progressPercent: Int?) -> Unit = { _, _ -> },
     ) = withContext(Dispatchers.IO) {
         require(inputs.size >= 2) { "結合する動画を2本以上選択してください" }
         val destination = Uri.parse(outputUri)
@@ -104,7 +104,8 @@ class ExternalEditPipeline(
         val workDir = createWorkDir()
         try {
             val signatures = inputs.mapIndexed { index, source ->
-                onProgress("入力を確認しています ${index + 1}/${inputs.size}")
+                val inspectionPercent = 5 + ((index * 15) / inputs.size)
+                onProgress("入力を確認しています ${index + 1}/${inputs.size}", inspectionPercent)
                 openReadDescriptor(source).use { descriptor ->
                     NamedMediaSignature(
                         displayName = source.displayName,
@@ -112,8 +113,12 @@ class ExternalEditPipeline(
                     )
                 }
             }
-            onProgress("互換性を確認しています")
+            onProgress("互換性を確認しています", 20)
             mediaEngine.requireLosslessConcatCompatibility(signatures)
+            val expectedDurationMs = signatures
+                .map { it.signature.durationMs }
+                .takeIf { durations -> durations.all { it != null } }
+                ?.sumOf { duration -> requireNotNull(duration) }
 
             val inputDescriptors = mutableListOf<ParcelFileDescriptor>()
             var jacketDescriptor: ParcelFileDescriptor? = null
@@ -131,7 +136,7 @@ class ExternalEditPipeline(
                         displayName = inputs[index].displayName,
                     )
                 }
-                onProgress("無劣化で結合しながら${destinationLabel}へ保存中")
+                onProgress("無劣化で結合を開始しています", 25)
                 mediaEngine.concatLosslessDescriptorsValidated(
                     inputs = descriptorInputs,
                     outputFd = outputDescriptor.fd,
@@ -139,7 +144,15 @@ class ExternalEditPipeline(
                     sourceSignature = sourceSignature,
                     jacketFd = jacketDescriptor?.fd,
                     workingDirectory = workDir,
-                )
+                    expectedDurationMs = expectedDurationMs,
+                ) { concatPercent ->
+                    val overallPercent = 25 + ((concatPercent * 70) / 100)
+                    onProgress(
+                        "無劣化で結合中 ${concatPercent}% ・ ${destinationLabel}へ保存中",
+                        overallPercent.coerceIn(25, 95),
+                    )
+                }
+                onProgress("出力を確定しています", 96)
                 val completedOutput = requireNotNull(outputDescriptor)
                 outputDescriptor = null
                 closeOutputOrThrow { completedOutput.close() }
@@ -159,11 +172,11 @@ class ExternalEditPipeline(
 
         try {
             if (remoteDestination) {
-                onProgress("SMB保存を確定しています")
+                onProgress("SMB保存を確定しています", 98)
                 commitRemoteOutput(destination)
-                onProgress("SMBへ直接保存しました")
+                onProgress("SMBへ直接保存しました", 100)
             } else {
-                onProgress("端末へ保存しました")
+                onProgress("端末へ保存しました", 100)
             }
         } catch (error: Throwable) {
             abortOutput(destination)
