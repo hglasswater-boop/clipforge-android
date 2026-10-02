@@ -166,7 +166,7 @@ class ClipForgeProcessingService : Service() {
             inputs = inputs,
             outputUri = outputUri,
             outputName = outputName,
-        ) { message -> updateProgress(title, message) }
+        ) { message, percent -> updateProgress(title, message, percent) }
         finishSuccess("処理が完了しました")
     }
 
