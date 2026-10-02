@@ -102,6 +102,7 @@ internal class WriteProgressEta(
         message.startsWith("スマートカットを書き出し中 ") -> "smart-write"
         message.startsWith("無劣化で書き出し中 ") -> "lossless-write"
         message.startsWith("キーフレーム一致のため無劣化で書き出し中 ") -> "keyframe-lossless-write"
+        message.startsWith("無劣化で結合中 ") -> "lossless-concat"
         else -> null
     }
 
