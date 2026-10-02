@@ -875,6 +875,8 @@ class FfmpegMediaEngine {
         sourceSignature: MediaSignature,
         jacketFd: Int? = null,
         workingDirectory: File,
+        expectedDurationMs: Long? = null,
+        onProgressPercent: (Int) -> Unit = {},
     ) = withContext(Dispatchers.IO) {
         require(inputs.size >= 2) { "At least two files are required" }
         val hasJacket = sourceSignature.hasAttachedPicture()
@@ -906,7 +908,11 @@ class FfmpegMediaEngine {
                 "-fd", outputFd.toString(),
                 "fd:",
             )
-            runFfmpeg(args)
+            runFfmpeg(
+                arguments = args,
+                expectedDurationMs = expectedDurationMs,
+                onProgressPercent = onProgressPercent,
+            )
         } finally {
             listFile.delete()
         }
