@@ -58,6 +58,18 @@ class WriteProgressEtaTest {
     }
 
     @Test
+    fun concatProgressGetsRemainingTimeEstimate() {
+        var now = 0L
+        val eta = WriteProgressEta { now }
+
+        eta.decorate("無劣化で結合中 10% ・ SMBへ保存中")
+        now = 4_000L
+        val decorated = eta.decorate("無劣化で結合中 20% ・ SMBへ保存中")
+
+        assertTrue(decorated.contains("残り 約32秒"))
+    }
+
+    @Test
     fun remainingTimeFormattingKeepsSecondsMoving() {
         assertEquals("約45秒", formatRemainingTime(45_000L))
         assertEquals("約2分40秒", formatRemainingTime(160_000L))
