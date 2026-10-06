@@ -17,6 +17,12 @@ ClipForge の UI トーンは XFiles を基準にする。
 - edge-to-edge の status bar / navigation bar のアイコン明暗は、実際の light / dark theme に追従させる。
 - API 26-28 の navigation bar scrim は XFiles と同じ light / dark 値を使う。
 
+## Material3 dependency
+
+XFiles は Expressive API を公開している `androidx.compose.material3:material3:1.5.0-alpha23` を明示的に使用している。ClipForge も同じ Material3 バージョンを使用し、stable 1.4 系の internal Expressive API へ依存しない。
+
+Compose BOM は ClipForge の既存 API 36 互換ラインを維持し、UIトーン統一に不要な SDK / Compose 全体の更新はこの変更へ混ぜない。
+
 ## Implementation rule
 
 Theme policy は `ClipForgeTheme` に集約する。Activity や各画面で `MaterialTheme`、`lightColorScheme()`、`darkColorScheme()` を直接選択しない。
