@@ -9,15 +9,11 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBarsPadding
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
@@ -28,6 +24,7 @@ import app.clipforge.ui.AutoTrimEntryButton
 import app.clipforge.ui.AutoTrimHost
 import app.clipforge.ui.ClipForgeApp
 import app.clipforge.ui.ClipForgeDirectOutputHost
+import app.clipforge.ui.theme.ClipForgeTheme
 import app.clipforge.update.ClipForgeUpdateHost
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -42,7 +39,6 @@ class MainActivity : ComponentActivity() {
         handleIncomingIntent(intent)
         setContent {
             val mainState by mainViewModel.uiState.collectAsStateWithLifecycle()
-            val dark = isSystemInDarkTheme()
 
             LaunchedEffect(mainState.trimEditor?.sessionPath) {
                 val editor = mainState.trimEditor ?: return@LaunchedEffect
@@ -67,7 +63,7 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            MaterialTheme(colorScheme = if (dark) darkColorScheme() else lightColorScheme()) {
+            ClipForgeTheme {
                 Box(Modifier.fillMaxSize()) {
                     Column(
                         Modifier
