@@ -33,6 +33,8 @@ Theme policy は `ClipForgeTheme` に集約する。Activity や各画面で `Ma
 
 テーマ選択条件は純粋関数としてテスト可能にする。純粋関数は Android framework のクラスや定数を参照せず、SDKレベルを整数として受け取る。Android 12 の境界値は API 31 としてアプリ側の定数に保持する。
 
+JVM unit test からテーマ選択関数を安全に呼べるよう、同じ Kotlin file の top-level 初期化でも `Color.argb()` などの Android framework API を実行しない。Android API を必要とする値は、実際の UI 実行時にのみ評価する。
+
 次のケースをテストで固定する。
 
 1. API 31+ / Dynamic Color 有効 / light -> Dynamic Light
