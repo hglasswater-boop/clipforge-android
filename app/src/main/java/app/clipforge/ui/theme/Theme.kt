@@ -38,9 +38,11 @@ internal fun selectThemeSchemeSource(
     else -> ThemeSchemeSource.ExpressiveLight
 }
 
-// Keep edge-to-edge system bars visually aligned with XFiles on Android 8-9.
-private val LegacyLightNavigationBarScrim = Color.argb(0xE6, 0xFF, 0xFF, 0xFF)
-private val LegacyDarkNavigationBarScrim = Color.argb(0x80, 0x1B, 0x1B, 0x1B)
+private fun legacyNavigationBarScrim(darkTheme: Boolean): Int = if (darkTheme) {
+    Color.argb(0x80, 0x1B, 0x1B, 0x1B)
+} else {
+    Color.argb(0xE6, 0xFF, 0xFF, 0xFF)
+}
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
@@ -73,11 +75,7 @@ fun ClipForgeTheme(
 
             if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P) {
                 @Suppress("DEPRECATION")
-                activity.window.navigationBarColor = if (darkTheme) {
-                    LegacyDarkNavigationBarScrim
-                } else {
-                    LegacyLightNavigationBarScrim
-                }
+                activity.window.navigationBarColor = legacyNavigationBarScrim(darkTheme)
             }
 
             val controller = WindowCompat.getInsetsController(activity.window, view)
