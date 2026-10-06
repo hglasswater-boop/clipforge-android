@@ -31,7 +31,9 @@ SDK 36 を維持するために古い Material3 へ戻す互換レイヤーは�
 
 Theme policy は `ClipForgeTheme` に集約する。Activity や各画面で `MaterialTheme`、`lightColorScheme()`、`darkColorScheme()` を直接選択しない。
 
-テーマ選択条件は純粋関数としてテスト可能にし、次のケースを固定する。
+テーマ選択条件は純粋関数としてテスト可能にする。純粋関数は Android framework のクラスや定数を参照せず、SDKレベルを整数として受け取る。Android 12 の境界値は API 31 としてアプリ側の定数に保持する。
+
+次のケースをテストで固定する。
 
 1. API 31+ / Dynamic Color 有効 / light -> Dynamic Light
 2. API 31+ / Dynamic Color 有効 / dark -> Dynamic Dark
