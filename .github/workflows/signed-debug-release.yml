@@ -25,12 +25,10 @@ jobs:
           java-version: '17'
       - uses: android-actions/setup-android@v3
         with:
-          cmdline-tools-version: '15859902'
           packages: platform-tools
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.6.0'
-      - run: sdkmanager "platforms;android-37" "build-tools;37.0.0"
 
       - name: Compute Android build number
         id: build_number
