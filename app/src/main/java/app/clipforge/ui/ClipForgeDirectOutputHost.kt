@@ -6,8 +6,10 @@ import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -24,14 +26,14 @@ fun ClipForgeDirectOutputHost(viewModel: MainViewModel) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val request = state.pendingDestination
 
-    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+    val outputLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         if (result.resultCode != Activity.RESULT_OK) {
             viewModel.destinationPickerCancelled()
             return@rememberLauncherForActivityResult
         }
         val uri = result.data?.data
         if (uri == null) {
-            viewModel.destinationPickerFailed("XFilesから保存先URIを受け取れませんでした")
+            viewModel.destinationPickerFailed("保存先URIを受け取れませんでした")
             return@rememberLauncherForActivityResult
         }
         val grantedFlags = result.data?.flags
@@ -41,20 +43,66 @@ fun ClipForgeDirectOutputHost(viewModel: MainViewModel) {
         viewModel.startPendingDestination(uri.toString())
     }
 
-    LaunchedEffect(request?.token) {
-        val pending = request ?: return@LaunchedEffect
-        val intent = Intent(XFILES_OUTPUT_ACTION)
+    val xFilesIntent = request?.let { pending ->
+        Intent(XFILES_OUTPUT_ACTION)
             .setPackage(XFILES_PACKAGE)
             .putExtra(XFILES_OUTPUT_NAME, pending.outputName)
             .putExtra(XFILES_OUTPUT_MIME, pending.mimeType)
-        if (intent.resolveActivity(context.packageManager) == null) {
-            viewModel.destinationPickerFailed("XFilesを最新バージョンへ更新してください")
-            return@LaunchedEffect
-        }
-        runCatching { launcher.launch(intent) }
-            .onFailure { error ->
-                viewModel.destinationPickerFailed(error.message ?: "XFilesを開けませんでした")
-            }
+    }
+    val destinations = availableOutputDestinations(
+        xFilesAvailable = xFilesIntent?.resolveActivity(context.packageManager) != null,
+    )
+
+    request?.let { pending ->
+        AlertDialog(
+            onDismissRequest = viewModel::destinationPickerCancelled,
+            title = { Text("保存先を選択") },
+            text = {
+                Text(
+                    if (OutputDestinationTarget.XFILES_SMB in destinations) {
+                        "端末ローカル、またはXFilesでSMBの保存先を選択できます。"
+                    } else {
+                        "端末ローカルの保存先を選択できます。"
+                    },
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val intent = Intent(Intent.ACTION_CREATE_DOCUMENT)
+                            .addCategory(Intent.CATEGORY_OPENABLE)
+                            .setType(pending.mimeType)
+                            .putExtra(Intent.EXTRA_TITLE, pending.outputName)
+                            .addFlags(
+                                Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
+                                    Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION,
+                            )
+                        runCatching { outputLauncher.launch(intent) }
+                            .onFailure { error ->
+                                viewModel.destinationPickerFailed(error.message ?: "端末の保存先を開けませんでした")
+                            }
+                    },
+                ) {
+                    Text("端末に保存")
+                }
+            },
+            dismissButton = {
+                if (OutputDestinationTarget.XFILES_SMB in destinations) {
+                    TextButton(
+                        onClick = {
+                            val intent = checkNotNull(xFilesIntent)
+                            runCatching { outputLauncher.launch(intent) }
+                                .onFailure { error ->
+                                    viewModel.destinationPickerFailed(error.message ?: "XFilesを開けませんでした")
+                                }
+                        },
+                    ) {
+                        Text("XFilesでSMBに保存")
+                    }
+                }
+            },
+        )
     }
 }
 
