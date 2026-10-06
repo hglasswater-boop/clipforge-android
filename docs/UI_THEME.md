@@ -21,7 +21,9 @@ ClipForge の UI トーンは XFiles を基準にする。
 
 XFiles は Expressive API を公開している `androidx.compose.material3:material3:1.5.0-alpha23` と Compose BOM `2026.06.01` を使用している。ClipForge も同じ UI stack に揃える。
 
-Material3 `1.5.0-alpha23` の依存する Compose 1.12 系は compileSdk 37 以上を要求するため、ClipForge は `compileSdk = 37` / `targetSdk = 37` を使用する。CI と signed-debug release も Android 37 platform / build-tools 37.0.0 を使用する。
+Material3 `1.5.0-alpha23` の依存する Compose 1.12 系は compileSdk 37 以上を要求するため、ClipForge は `compileSdk = 37` / `targetSdk = 37` を使用する。
+
+CI / signed-debug release の Android SDK セットアップも XFiles と同じく `android-actions/setup-android` で `platform-tools` を準備し、特定の旧 `sdkmanager` / command-line tools バージョンへ固定しない。必要な compile SDK は Gradle / Android build toolchain に解決させる。
 
 SDK 36 を維持するために古い Material3 へ戻す互換レイヤーは設けない。
 
