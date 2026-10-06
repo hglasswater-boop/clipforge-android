@@ -18,6 +18,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
 
+private const val DynamicColorMinSdk = 31
+
 internal enum class ThemeSchemeSource {
     DynamicLight,
     DynamicDark,
@@ -30,8 +32,8 @@ internal fun selectThemeSchemeSource(
     darkTheme: Boolean,
     dynamicColor: Boolean,
 ): ThemeSchemeSource = when {
-    dynamicColor && sdkInt >= Build.VERSION_CODES.S && darkTheme -> ThemeSchemeSource.DynamicDark
-    dynamicColor && sdkInt >= Build.VERSION_CODES.S -> ThemeSchemeSource.DynamicLight
+    dynamicColor && sdkInt >= DynamicColorMinSdk && darkTheme -> ThemeSchemeSource.DynamicDark
+    dynamicColor && sdkInt >= DynamicColorMinSdk -> ThemeSchemeSource.DynamicLight
     darkTheme -> ThemeSchemeSource.Dark
     else -> ThemeSchemeSource.ExpressiveLight
 }
